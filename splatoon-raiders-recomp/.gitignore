@@ -1,0 +1,18 @@
+# never commit game files or anything built from them
+work/
+build/
+dist/
+shader/build/
+*.exe
+*.pdb
+*.bin
+*.nso
+*.nca
+*.nsp
+*.xci
+exefs/
+romfs/
+profile/
+logs/
+splatoon.ini
+__pycache__/

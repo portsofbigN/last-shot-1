@@ -1,0 +1,80 @@
+#version 450
+// FXAA (Timothy Lottes' fast approximate anti-aliasing, the 3.11 "quality" algorithm written out here) over a
+// rectangle of the game's final frame, before FSR / NIS scale it up. The game's own anti-aliasing ran inside its
+// neural upscaler, which the port replaces (nx2_vkdraw.c): without this the frame had no anti-aliasing at all.
+// src: a copy of the frame (sRGB-encoded RGB10A2, so luma is perceptual); dst: the frame itself.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0) uniform sampler2D src;
+layout(binding = 1, rgb10_a2) uniform writeonly image2D dst;
+layout(push_constant) uniform Pc { float x, y, w, h, tw, th; } pc;   // rectangle; texture size
+
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+vec4 at(vec2 uv) { return textureLod(src, uv, 0.0); }
+
+const float EDGE_MIN = 0.0312;   // darkest edges ignored
+const float EDGE_REL = 0.125;    // local contrast needed
+const float SUBPIX = 0.75;       // amount of sub-pixel smoothing
+const float STEPS[12] = float[](1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0);
+
+void main() {
+    ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (g.x >= int(pc.w) || g.y >= int(pc.h)) return;
+    ivec2 p = g + ivec2(int(pc.x), int(pc.y));
+    vec2 rcp = 1.0 / vec2(pc.tw, pc.th);
+    vec2 uv = (vec2(p) + 0.5) * rcp;
+    vec4 cc = at(uv);
+    float lM = luma(cc.rgb);
+    float lN = luma(at(uv + vec2(0, -1) * rcp).rgb), lS = luma(at(uv + vec2(0, 1) * rcp).rgb);
+    float lW = luma(at(uv + vec2(-1, 0) * rcp).rgb), lE = luma(at(uv + vec2(1, 0) * rcp).rgb);
+    float lMax = max(lM, max(max(lN, lS), max(lW, lE))), lMin = min(lM, min(min(lN, lS), min(lW, lE)));
+    float range = lMax - lMin;
+    if (range < max(EDGE_MIN, lMax * EDGE_REL)) {
+        imageStore(dst, p, cc);
+        return;
+    }
+    float lNW = luma(at(uv + vec2(-1, -1) * rcp).rgb), lNE = luma(at(uv + vec2(1, -1) * rcp).rgb);
+    float lSW = luma(at(uv + vec2(-1, 1) * rcp).rgb), lSE = luma(at(uv + vec2(1, 1) * rcp).rgb);
+    // sub-pixel blend amount
+    float avg = (2.0 * (lN + lS + lW + lE) + lNW + lNE + lSW + lSE) / 12.0;
+    float sub = clamp(abs(avg - lM) / range, 0.0, 1.0);
+    sub = smoothstep(0.0, 1.0, sub);
+    sub = sub * sub * SUBPIX;
+    // edge direction
+    float eH = abs(lNW + lNE - 2.0 * lN) + 2.0 * abs(lW + lE - 2.0 * lM) + abs(lSW + lSE - 2.0 * lS);
+    float eV = abs(lNW + lSW - 2.0 * lW) + 2.0 * abs(lN + lS - 2.0 * lM) + abs(lNE + lSE - 2.0 * lE);
+    bool horz = eH >= eV;
+    float l1 = horz ? lN : lW, l2 = horz ? lS : lE;
+    float g1 = abs(l1 - lM), g2 = abs(l2 - lM);
+    float stepLen = horz ? rcp.y : rcp.x;
+    float lLocal, grad;
+    if (g1 >= g2) {
+        stepLen = -stepLen;
+        lLocal = 0.5 * (l1 + lM);
+        grad = g1;
+    } else {
+        lLocal = 0.5 * (l2 + lM);
+        grad = g2;
+    }
+    vec2 e = uv;
+    if (horz) e.y += stepLen * 0.5; else e.x += stepLen * 0.5;
+    vec2 off = horz ? vec2(rcp.x, 0) : vec2(0, rcp.y);
+    float scaled = grad * 0.25;
+    // walk both ways along the edge
+    vec2 u1 = e - off, u2 = e + off;
+    float d1 = luma(at(u1).rgb) - lLocal, d2 = luma(at(u2).rgb) - lLocal;
+    bool r1 = abs(d1) >= scaled, r2 = abs(d2) >= scaled;
+    for (int i = 0; i < 12 && !(r1 && r2); i++) {
+        if (!r1) { u1 -= off * STEPS[i]; d1 = luma(at(u1).rgb) - lLocal; r1 = abs(d1) >= scaled; }
+        if (!r2) { u2 += off * STEPS[i]; d2 = luma(at(u2).rgb) - lLocal; r2 = abs(d2) >= scaled; }
+    }
+    float dist1 = horz ? uv.x - u1.x : uv.y - u1.y, dist2 = horz ? u2.x - uv.x : u2.y - uv.y;
+    bool nearer1 = dist1 < dist2;
+    float dist = min(dist1, dist2), len = dist1 + dist2;
+    bool smaller = lM < lLocal;
+    bool correct = ((nearer1 ? d1 : d2) < 0.0) != smaller;
+    float edgeOff = correct ? 0.5 - dist / len : 0.0;
+    float o = max(edgeOff, sub);
+    vec2 fuv = uv;
+    if (horz) fuv.y += o * stepLen; else fuv.x += o * stepLen;
+    imageStore(dst, p, vec4(at(fuv).rgb, cc.a));
+}

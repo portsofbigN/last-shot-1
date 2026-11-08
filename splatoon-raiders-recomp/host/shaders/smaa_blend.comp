@@ -1,0 +1,15 @@
+#version 450
+// SMAA pass 3: neighbourhood blending of a copy of the frame into the frame itself.
+#extension GL_GOOGLE_include_directive : require
+#include "smaa_common.glsl"
+layout(binding = 0) uniform sampler2D colorTex;    // linear
+layout(binding = 2) uniform sampler2D blendTex;    // linear
+layout(binding = 1, rgb10_a2) uniform writeonly image2D dst;
+void main() {
+    ivec2 p;
+    vec2 uv;
+    if (!smaa_pixel(p, uv)) return;
+    vec4 off;
+    SMAANeighborhoodBlendingVS(uv, off);
+    imageStore(dst, p, SMAANeighborhoodBlendingPS(uv, off, colorTex, blendTex));
+}
