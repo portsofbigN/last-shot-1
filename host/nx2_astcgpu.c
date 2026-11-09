@@ -3,11 +3,15 @@
 // all cores and each new item in the Gear menu ~50 ms. Here the raw blocks go into the staging ring and TotK Recomp's
 // compute decoder (shaders/astc_decode.comp, the same bytes as the CPU decoder) writes the texels into a device-local
 // scratch ring, which is copied into the image. NX2_ASTC=cpu keeps the CPU decoder.
+// The decoded texels are then encoded to BC3 on the GPU (TotK Recomp's shaders/bc3_encode.comp), 1 byte a texel
+// instead of 4: ASTC textures took most of the video memory (5 GB of an 8 GB card after a few missions in 4K).
+// NX2_TEX_COMPRESS: auto (default: on with less than 12 GB of video memory), 1 on, 0 off (RGBA8, sharper normal maps).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "astc_decode_spv.h"
+#include "bc3_encode_spv.h"
 #include "host.h"
 #include "nx2_vk.h"
 
@@ -88,9 +92,10 @@ static struct {
     VkPipelineLayout layout;
     VkPipeline pipe;
     VkDescriptorPool pool;
-    VkDescriptorSet set;
-    VkBuffer scratch, tab;
-    VkDeviceMemory scratch_mem, tab_mem;
+    VkDescriptorSet set, bc_set;
+    VkPipeline bc_pipe;          // 0: images stay RGBA8
+    VkBuffer scratch, tab, bc_buf;
+    VkDeviceMemory scratch_mem, tab_mem, bc_mem;
     VkDeviceSize pos;            // next free byte of the scratch
     VkCommandBuffer last_cb;
     uint64_t texels, calls;
@@ -136,8 +141,8 @@ static int init(VkDevice dev, VkPhysicalDevice phys, VkBuffer src, VkDeviceSize 
     VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push)};
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof astc_decode_spv, astc_decode_spv};
     VkShaderModule m = VK_NULL_HANDLE;
-    VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
-    VkDescriptorPoolCreateInfo pci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 1, 1, &ps};
+    VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6};
+    VkDescriptorPoolCreateInfo pci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 2, 1, &ps};
     if (vkCreateDescriptorSetLayout(dev, &dci, NULL, &G.dsl) != VK_SUCCESS) goto fail;
     VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &G.dsl, 1, &pr};
     if (vkCreatePipelineLayout(dev, &li, NULL, &G.layout) != VK_SUCCESS) goto fail;
@@ -167,8 +172,43 @@ static int init(VkDevice dev, VkPhysicalDevice phys, VkBuffer src, VkDeviceSize 
         w[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, G.set, (uint32_t)i, 0, 1,
                                       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &dbi[i], NULL};
     vkUpdateDescriptorSets(dev, 3, w, 0, NULL);
-    rt_log("astc: decoded on the GPU");
-    return G.ok = 1;
+    G.ok = 1;
+    // BC3 encoding: when asked for (or auto with a smaller card) and the device samples BC3
+    const char *tc = getenv("NX2_TEX_COMPRESS");
+    int want = tc && !strcmp(tc, "1");
+    if (!tc || !strcmp(tc, "auto")) {
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+        VkDeviceSize vram = 0;
+        for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+            if ((mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mp.memoryHeaps[i].size > vram)
+                vram = mp.memoryHeaps[i].size;
+        want = vram < (12ull << 30);
+    }
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(phys, VK_FORMAT_BC3_SRGB_BLOCK, &fp);
+    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    VkShaderModuleCreateInfo bmi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof bc3_encode_spv, bc3_encode_spv};
+    VkShaderModule bm = VK_NULL_HANDLE;
+    if (want && (fp.optimalTilingFeatures & need) == need && vkCreateShaderModule(dev, &bmi, NULL, &bm) == VK_SUCCESS) {
+        ci.stage.module = bm;
+        VkDescriptorSetAllocateInfo bai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, G.pool, 1, &G.dsl};
+        VkDeviceSize bcs = SCRATCH / 4 + (4ull << 20);
+        if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &G.bc_pipe) == VK_SUCCESS &&
+            buffer(bcs, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &G.bc_buf, &G.bc_mem) &&
+            vkAllocateDescriptorSets(dev, &bai, &G.bc_set) == VK_SUCCESS) {
+            VkDescriptorBufferInfo bdi[3] = {{G.scratch, 0, SCRATCH}, {G.bc_buf, 0, bcs}, {G.tab, 0, TAB_SIZE}};
+            for (int i = 0; i < 3; i++) w[i].dstSet = G.bc_set, w[i].pBufferInfo = &bdi[i];
+            vkUpdateDescriptorSets(dev, 3, w, 0, NULL);
+        } else {
+            if (G.bc_pipe) vkDestroyPipeline(dev, G.bc_pipe, NULL);
+            G.bc_pipe = VK_NULL_HANDLE;
+        }
+        vkDestroyShaderModule(dev, bm, NULL);
+    }
+    rt_log("astc: decoded on the GPU, stored as %s", G.bc_pipe ? "BC3 (1 byte a texel)" : "RGBA8");
+    return 1;
 fail:
     rt_log("astc: the GPU decoder could not be created: decoded on the CPU");
     return 0;
@@ -177,6 +217,12 @@ fail:
 static void barrier(VkCommandBuffer cb, VkPipelineStageFlags s, VkAccessFlags sa, VkPipelineStageFlags d, VkAccessFlags da) {
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, sa, da};
     vkCmdPipelineBarrier(cb, s, d, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+
+// 1: ASTC images are BC3 (nx2_vkdraw.c creates them so and uploads them only through nx2_astc_gpu_band)
+int nx2_astc_gpu_bc(VkDevice dev, VkPhysicalDevice phys, VkBuffer src, VkDeviceSize src_size) {
+    if (!G.tried) init(dev, phys, src, src_size);
+    return G.ok && G.bc_pipe;
 }
 
 // Rows of a w-wide texture one call can take (0: the GPU decoder is off). src is the staging ring, bound whole.
@@ -208,8 +254,23 @@ int nx2_astc_gpu_band(VkCommandBuffer cb, VkDeviceSize src_off, uint32_t w, uint
     vkCmdDispatch(cb, (bx + bpw - 1) / bpw, by, 1);
     barrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_ACCESS_TRANSFER_READ_BIT);
-    VkBufferImageCopy cp = {G.pos, 0, 0, {aspect, level, layer, 1}, {0, y, z}, {w, h, 1}};
-    vkCmdCopyBufferToImage(cb, G.scratch, img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+    if (G.bc_pipe) {   // the texels to BC3 blocks (y is on a 4-row boundary: nx2_vkdraw.c sizes the bands so)
+        uint32_t bx4 = (w + 3) / 4, by4 = (h + 3) / 4;
+        barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT);   // the previous band's copy out of bc_buf
+        struct { uint32_t in_base, out_base, width, height, bx, bslice; } bp = {(uint32_t)(G.pos / 4), 0, w, h, bx4, bx4 * by4};
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, G.bc_pipe);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, G.layout, 0, 1, &G.bc_set, 0, NULL);
+        vkCmdPushConstants(cb, G.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof bp, &bp);
+        vkCmdDispatch(cb, (bx4 + 7) / 8, (by4 + 7) / 8, 1);
+        barrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy cp = {0, bx4 * 4, by4 * 4, {aspect, level, layer, 1}, {0, y, z}, {w, h, 1}};
+        vkCmdCopyBufferToImage(cb, G.bc_buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+    } else {
+        VkBufferImageCopy cp = {G.pos, 0, 0, {aspect, level, layer, 1}, {0, y, z}, {w, h, 1}};
+        vkCmdCopyBufferToImage(cb, G.scratch, img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+    }
     G.pos += out;
     G.texels += (uint64_t)w * h;
     uint64_t n = ++G.calls;

@@ -76,6 +76,12 @@ static const char *const n_layout[] = {"Posição do Switch (A à direita)", "Xb
 static const char *const e_layout[] = {"Switch positions (A on the right)", "Xbox / PlayStation (A at the bottom)"};
 static const char *const n_async[] = {"Esperar (sem falhas visuais)", "Em segundo plano (sem travadas)"};
 static const char *const e_async[] = {"Wait (no visual gaps)", "In the background (no stutter)"};
+static const char *const v_trig[] = {"2", "1", "0"};
+static const char *const n_trig[] = {"Resistência no curso todo (padrão)", "Clique de gatilho", "Desligados"};
+static const char *const e_trig[] = {"Resistance over the whole pull (default)", "Trigger click", "Off"};
+static const char *const v_fg[] = {"1", "2", "3", "4"};
+static const char *const n_fg[] = {"Desligada", "2x (60 → 120 FPS)", "3x (60 → 180 FPS)", "4x (60 → 240 FPS)"};
+static const char *const e_fg[] = {"Off", "2x (60 → 120 FPS)", "3x (60 → 180 FPS)", "4x (60 → 240 FPS)"};
 static const char *const v_hdr[] = {"0", "1"};
 static const char *const n_hdr[] = {"Desligado", "Ligado (monitor HDR)"};
 static const char *const e_hdr[] = {"Off", "On (HDR monitor)"};
@@ -126,6 +132,13 @@ static Setting settings[] = {
       "velocidade certa com menos carga na placa.",
       "Frames per second. The game counts time in 1/60 s frames: above 60 it would run too fast. 30 keeps the right "
       "speed with less load on the graphics card."}},
+    {"framegen", "NX2_FRAMEGEN", "1", {"Geração de quadros", "Frame generation"}, v_fg, {n_fg, e_fg}, 4, CAT_PERF,
+     {"Cria quadros entre os do jogo, que roda a 60, para a imagem ficar mais fluida em monitores rápidos (método do "
+      "Hookshot). Custa alguns FPS do jogo na GPU, atrasa a imagem em cerca de um quadro e pode borrar movimentos "
+      "rápidos. Escolha um valor que o monitor mostre (120 Hz ou mais para 2x).",
+      "Makes frames between the game's, which runs at 60, for smoother motion on fast monitors (Hookshot's method). It "
+      "costs the game a few FPS on the GPU, delays the picture by about one frame and can smear fast motion. Pick a "
+      "rate your monitor shows (120 Hz or more for 2x)."}},
     {"vsync", "NX2_VSYNC", "0", {"VSync", "VSync"}, v_vsync, {n_vsync, e_vsync}, 3, CAT_PERF,
      {"Ligado evita cortes na imagem (tearing); desligado tem menos atraso. G-SYNC / FreeSync: o monitor acompanha os "
       "60 FPS do jogo, sem cortes nem trepidação (precisa de monitor compatível e, na NVIDIA, do G-SYNC ligado também "
@@ -146,9 +159,11 @@ static Setting settings[] = {
     {"rumble", "NX2_RUMBLE", "100", {"Vibração", "Rumble"}, v_rumble, {n_rumble, e_rumble}, 3, CAT_PAD,
      {"Força da vibração do controle (Xbox e PlayStation, com fio ou Bluetooth).",
       "Controller rumble strength (Xbox and PlayStation, wired or Bluetooth)."}},
-    {"triggers", "NX2_TRIGGERS", "1", {"Gatilhos adaptativos", "Adaptive triggers"}, v_onoff, {n_launch, e_launch}, 2, CAT_PAD,
-     {"DualSense: o R2 (atirar) fica com uma resistência leve, como um gatilho de arma. O L2 continua livre.",
-      "DualSense: R2 (shoot) gets a light resistance, like a weapon trigger. L2 stays free."}},
+    {"triggers", "NX2_TRIGGERS", "2", {"Gatilhos adaptativos", "Adaptive triggers"}, v_trig, {n_trig, e_trig}, 3, CAT_PAD,
+     {"DualSense, no R2 (atirar). Resistência: o botão inteiro fica um pouco mais duro. Clique: um ponto de pressão no "
+      "meio do curso que cede, como o gatilho de uma arma. O L2 continua livre.",
+      "DualSense, on R2 (shoot). Resistance: the whole pull is a little stiffer. Click: a pressure point halfway down "
+      "that gives way, like a gun trigger. L2 stays free."}},
     {"motion", "NX2_GYRO", "1", {"Mira por movimento", "Motion aiming"}, v_motion, {n_motion, e_motion}, 2, CAT_PAD,
      {"Como no Switch: mova o controle para mirar (giroscópio do DualSense / DualShock 4). Outros controles usam o analógico R.",
       "As on the Switch: move the controller to aim (DualSense / DualShock 4 gyro). Other controllers use the right stick."}},

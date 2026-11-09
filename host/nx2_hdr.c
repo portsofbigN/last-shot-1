@@ -93,20 +93,38 @@ void nx2_hdr_overlay(uint32_t *px, size_t n) {
 
 // Tests: a PQ RGB10A2 frame (R in the low bits) to sRGB RGBA8 in place, SDR white at 203 nits, clipped
 void nx2_hdr_to_srgb8(uint8_t *p, size_t n) {
-    static uint8_t lut[1024];
+    static float lin[1024];   // PQ code -> linear, SDR white 1
+    static uint8_t enc[4096];   // linear 0..1 -> sRGB 8-bit
     static int ready;
     if (!ready) {
-        for (int i = 0; i < 1024; i++) {
-            double l = pq_decode(i / 1023.0) / 203.0;
-            l = l > 1 ? 1 : l;
-            double s = l <= 0.0031308 ? l * 12.92 : 1.055 * pow(l, 1 / 2.4) - 0.055;
-            lut[i] = (uint8_t)lround(s * 255.0);
+        for (int i = 0; i < 1024; i++) lin[i] = (float)(pq_decode(i / 1023.0) / 203.0);
+        for (int i = 0; i < 4096; i++) {
+            double l = i / 4095.0;
+            enc[i] = (uint8_t)lround((l <= 0.0031308 ? l * 12.92 : 1.055 * pow(l, 1 / 2.4) - 0.055) * 255.0);
         }
         ready = 1;
     }
+    uint32_t mx = 0;
+    size_t over = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t v0;
+        memcpy(&v0, p + i * 4, 4);
+        uint32_t c = v0 & 1023, c1 = v0 >> 10 & 1023, c2 = v0 >> 20 & 1023;
+        c = c > c1 ? c : c1, c = c > c2 ? c : c2;
+        mx = c > mx ? c : mx;
+        over += lin[c] > 1.0f;
+    }
+    rt_log("hdr: shot: brightest %.0f nits, %.1f%% of the picture above SDR white", lin[mx] * 203.0, 100.0 * over / (double)n);
     for (size_t i = 0; i < n; i++) {
         uint32_t v;
         memcpy(&v, p + i * 4, 4);
-        p[i * 4] = lut[v & 1023], p[i * 4 + 1] = lut[v >> 10 & 1023], p[i * 4 + 2] = lut[v >> 20 & 1023], p[i * 4 + 3] = 255;
+        float r = lin[v & 1023], g = lin[v >> 10 & 1023], b = lin[v >> 20 & 1023];
+        float o[3] = {1.6605f * r - 0.5876f * g - 0.0728f * b, -0.1246f * r + 1.1329f * g - 0.0083f * b,
+                      -0.0182f * r - 0.1006f * g + 1.1187f * b};   // BT.2020 -> BT.709
+        for (int k = 0; k < 3; k++) {
+            float x = o[k] < 0 ? 0 : o[k] > 1 ? 1 : o[k];
+            p[i * 4 + k] = enc[(int)(x * 4095.0f + 0.5f)];
+        }
+        p[i * 4 + 3] = 255;
     }
 }

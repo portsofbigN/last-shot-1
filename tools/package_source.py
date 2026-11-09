@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DIRS = ['host', 'runtime', 'shader', 'recomp', 'tests', 'third_party', 'tools']
 FILES = ['COMO_JOGAR.md', 'HOW_TO_PLAY.md', 'ROADMAP.md', 'THIRD_PARTY_NOTICES.md']
-SKIP_DIRS = {'build', '__pycache__', '.git', 'shots', 'profile', 'logs'}
+SKIP_DIRS = {'streamline_dl', 'build', '__pycache__', '.git', 'shots', 'profile', 'logs'}
 SKIP_EXT = {'.exe', '.pdb', '.obj', '.o', '.lib', '.dll', '.bin', '.log', '.png', '.ninja', '.img', '.nso', '.nca',
             '.nsp', '.xci', '.npdm', '.spv', '.code', '.ctrl'}
 # the update this port was made from (exefs of update 65536 / version 65536)

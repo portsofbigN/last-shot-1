@@ -274,6 +274,7 @@ static uint64_t vram_used(uint64_t *budget) {   // device-local heaps: bytes in 
     *budget = total;
     return used;
 }
+uint64_t nx2_vk_vram_used(uint64_t *budget) { return vram_used(budget); }   // for the log (nx2_vkdraw.c)
 // the overlay bitmap's staging buffer (host visible), copied into the swapchain image after the game image
 static VkImageView present_src_view;   // a sampled view of the image being presented (FSR when the window is larger)
 void nx2_present_source_view(VkImageView v) { present_src_view = v; }
@@ -601,6 +602,7 @@ static void record_begin(void) {
     VKCHECK(vkBeginCommandBuffer(cmd, &bi));
 }
 
+static int shot_rgb10;   // the image shot is RGB10A2 (nx2_vk_shot_image)
 static void shot_from_image(VkImage img, VkImageLayout *layout, uint32_t w, uint32_t h, uint64_t frame,
                             const char *shot, int exit_after) {
     VkBuffer buf;
@@ -633,6 +635,13 @@ static void shot_from_image(VkImage img, VkImageLayout *layout, uint32_t w, uint
         int nx2_hdr_wanted(void);
         void nx2_hdr_to_srgb8(uint8_t *, size_t);
         if (nx2_hdr_wanted()) nx2_hdr_to_srgb8(p, (size_t)w * h);
+        else if (shot_rgb10)   // an RGB10A2 image (the frame interpolation's): to RGBA8
+            for (size_t i = 0; i < (size_t)w * h; i++) {
+                uint32_t v;
+                memcpy(&v, (uint8_t *)p + i * 4, 4);
+                uint8_t *o = (uint8_t *)p + i * 4;
+                o[0] = (uint8_t)((v & 1023) >> 2), o[1] = (uint8_t)((v >> 10 & 1023) >> 2), o[2] = (uint8_t)((v >> 20 & 1023) >> 2), o[3] = 255;
+            }
     }
     nx2_write_png(shot, p, w, h, getenv("NX2_SHOT_STEP") ? (uint32_t)atoi(getenv("NX2_SHOT_STEP")) : w >= 2560 ? 3 : 1);
     rt_log("screenshot of present #%llu (GPU image) written to %s", (unsigned long long)frame, shot);
@@ -662,6 +671,8 @@ static void shot_from_image(VkImage img, VkImageLayout *layout, uint32_t w, uint
     vkFreeMemory(dev, mem, NULL);
 }
 
+static void show_locked(VkImage img, VkImageLayout *layout, VkImageView view, uint32_t w, uint32_t h);
+extern uint64_t nx2_vk_frame;
 void nx2_present_image(VkImage img, VkImageLayout *layout, uint32_t w, uint32_t h, uint64_t frame) {
     const char *shot = getenv("NX2_SHOT");
     nx2_vk();
@@ -679,17 +690,40 @@ void nx2_present_image(VkImage img, VkImageLayout *layout, uint32_t w, uint32_t 
         shot_from_image(img, layout, w, h, frame, path, 0);
     }
     pace_frame();
-    if (IsIconic(hwnd)) {   // minimized: nothing to show (the game goes on)
-        plat_mutex_unlock(&lock);
-        return;
+    {   // frame interpolation (nx2_framegen.c): the frame goes to its display thread, which presents it and the frames
+        // made before it (outside this lock: the display thread presents under it)
+        int nx2_fg_mult(void);
+        int nx2_fg_submit(VkDevice, VkQueue, uint32_t, VkImage, VkImageLayout *, VkImageView, uint32_t, uint32_t, uint32_t,
+                          uint32_t, uint64_t);
+        if (nx2_fg_mult() > 1 && !IsIconic(hwnd)) {
+            VkImageView v = present_src_view;
+            // processed at the window's size when it is smaller than the game's frame (4K in TV mode), same shape
+            uint32_t tw = w, th = h;
+            if (swap_extent.width && swap_extent.height && (swap_extent.width < w || swap_extent.height < h)) {
+                double sx = (double)swap_extent.width / w, sy = (double)swap_extent.height / h, k = sx < sy ? sx : sy;
+                tw = (uint32_t)(w * k + 0.5), th = (uint32_t)(h * k + 0.5);
+            }
+            plat_mutex_unlock(&lock);
+            if (nx2_fg_submit(dev, queue, qfamily, img, layout, v, w, h, tw, th, frame)) return;
+            plat_mutex_lock(&lock);
+        }
     }
+    show_locked(img, layout, present_src_view, w, h);
+    plat_mutex_unlock(&lock);
+}
+
+// One frame to the window (lock held): the image (w x h, in *layout; view: a sampled view of it, for FSR) scaled into
+// the swapchain, the overlay over it, presented.
+static void show_locked(VkImage img, VkImageLayout *layout, VkImageView view, uint32_t w, uint32_t h) {
+    if (IsIconic(hwnd)) return;   // minimized: nothing to show (the game goes on)
     VKCHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX));
     uint32_t idx;
     VkResult ar = vkAcquireNextImageKHR(dev, swapchain, UINT64_MAX, sem_acquire, VK_NULL_HANDLE, &idx);
     if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
+        nx2_vk_queue_lock();
         vkDeviceWaitIdle(dev);
+        nx2_vk_queue_unlock();
         create_swapchain();
-        plat_mutex_unlock(&lock);
         return;
     }
     record_begin();
@@ -716,11 +750,11 @@ void nx2_present_image(VkImage img, VkImageLayout *layout, uint32_t w, uint32_t 
                         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                         {{ox, oy, 0}, {ox + ow2, oy + oh2, 1}}};
     int upscaled = 0;
-    if (present_src_view && ow2 > (int)w && oh2 > (int)h) {   // a window larger than the image: FSR
+    if (view && ow2 > (int)w && oh2 > (int)h) {   // a window larger than the image: FSR
         int nx2_fsr_upscale(VkDevice, VkCommandBuffer, VkImageView, VkImageLayout, int, int, const int[4], VkImage,
                             VkImageLayout, const int[4]);
         int crop[4] = {0, 0, (int)w, (int)h}, outr[4] = {ox, oy, ow2, oh2};
-        upscaled = nx2_fsr_upscale(dev, cmd, present_src_view, VK_IMAGE_LAYOUT_GENERAL, (int)w, (int)h, crop, dst,
+        upscaled = nx2_fsr_upscale(dev, cmd, view, VK_IMAGE_LAYOUT_GENERAL, (int)w, (int)h, crop, dst,
                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, outr);
     }
     if (!upscaled)
@@ -745,10 +779,16 @@ void nx2_present_image(VkImage img, VkImageLayout *layout, uint32_t w, uint32_t 
                 VKCHECK(vkBindBufferMemory(dev, ov_buf, ov_mem, 0));
                 VKCHECK(vkMapMemory(dev, ov_mem, 0, VK_WHOLE_SIZE, 0, &ov_ptr));
             }
-            for (uint32_t yy = 0; yy < oh; yy++) memcpy((uint32_t *)ov_ptr + (size_t)yy * ow, px + (size_t)yy * os, ow * 4);
-            if (swap_hdr) {   // the overlay is SDR: to PQ, at the brightness of SDR white
-                void nx2_hdr_overlay(uint32_t *, size_t);
-                nx2_hdr_overlay((uint32_t *)ov_ptr, (size_t)ow * oh);
+            static uint32_t row[8192];
+            for (uint32_t yy = 0; yy < oh; yy++) {
+                const uint32_t *src = px + (size_t)yy * os;
+                if (swap_hdr && ow <= 8192) {   // the overlay is SDR: to PQ (in normal memory: ov_ptr is slow to read)
+                    void nx2_hdr_overlay(uint32_t *, size_t);
+                    memcpy(row, src, ow * 4);
+                    nx2_hdr_overlay(row, ow);
+                    src = row;
+                }
+                memcpy((uint32_t *)ov_ptr + (size_t)yy * ow, src, ow * 4);
             }
             uint32_t margin = swap_extent.height / 90 + 4;
             VkBufferImageCopy oc = {0, ow, oh, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {(int)margin, (int)margin, 0},
@@ -768,11 +808,39 @@ void nx2_present_image(VkImage img, VkImageLayout *layout, uint32_t w, uint32_t 
     VKCHECK(vkQueueSubmit(queue, 1, &si, fence));
     VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, NULL, 1, &sem_done[idx], 1, &swapchain, &idx, NULL};
     VkResult pr = vkQueuePresentKHR(queue, &pi);
-    nx2_vk_queue_unlock();
     if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
         vkDeviceWaitIdle(dev);
+        nx2_vk_queue_unlock();
         create_swapchain();
+        return;
     }
+    nx2_vk_queue_unlock();
+}
+
+// The frame interpolation's display thread (nx2_framegen.c): an image of its own (GENERAL) to the window
+void nx2_vk_show_frame(VkImage img, VkImageView view, uint32_t w, uint32_t h) {
+    plat_mutex_lock(&lock);
+    VkImageLayout l = VK_IMAGE_LAYOUT_GENERAL;
+    show_locked(img, &l, view, w, h);
+    plat_mutex_unlock(&lock);
+}
+
+// Tests: an image (GENERAL) as a PNG, left GENERAL
+void nx2_vk_shot_image(VkImage img, uint32_t w, uint32_t h, const char *path) {
+    plat_mutex_lock(&lock);
+    VkImageLayout l = VK_IMAGE_LAYOUT_GENERAL;
+    shot_rgb10 = 1;
+    shot_from_image(img, &l, w, h, nx2_vk_frame, path, 0);
+    shot_rgb10 = 0;
+    VKCHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX));
+    record_begin();
+    barrier(img, l, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+    VKCHECK(vkEndCommandBuffer(cmd));
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &cmd, 0, NULL};
+    nx2_vk_queue_lock();
+    VKCHECK(vkQueueSubmit(queue, 1, &si, fence));
+    nx2_vk_queue_unlock();
+    VKCHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX));
     plat_mutex_unlock(&lock);
 }
 

@@ -503,6 +503,17 @@ static float vib_amp[2][2];   // [side][low, high]
 static void vib_apply(const uint32_t *h, const VibrationValue *v) {
     if (!h || !v) return;
     int side = (*h >> 16 & 0xff) == 1;
+    {   // NX2_MOTION_RATE=1 (debug): vibration values sent per 60 presents
+        static int on = -1;
+        static uint64_t n, from;
+        if (on < 0) on = getenv("NX2_MOTION_RATE") != NULL;
+        n++;
+        if (on && nx2_vk_frame >= from + 60) {
+            rt_log("hid: vibration sends %llu in presents %llu-%llu", (unsigned long long)n, (unsigned long long)from,
+                   (unsigned long long)nx2_vk_frame);
+            n = 0, from = nx2_vk_frame;
+        }
+    }
     vib_amp[side][0] = v->amp_low, vib_amp[side][1] = v->amp_high;
     static int nlog;
     if (nlog++ < 4) rt_log("hid: vibration %.2f / %.2f on side %d", v->amp_low, v->amp_high, side);
@@ -535,6 +546,17 @@ static int six_fill(SixAxisState *s, int max) {
     static uint64_t calls;
     calls++;
     if (!(calls & (calls - 1))) rt_log("hid: motion sensor read %llu times (max %d)", (unsigned long long)calls, max);
+    {   // NX2_MOTION_RATE=1 (debug): reads per 60 presents
+        static int on = -1;
+        static uint64_t n, from;
+        if (on < 0) on = getenv("NX2_MOTION_RATE") != NULL;
+        n++;
+        if (on && nx2_vk_frame >= from + 60) {
+            rt_log("hid: motion reads %llu in presents %llu-%llu", (unsigned long long)n, (unsigned long long)from,
+                   (unsigned long long)nx2_vk_frame);
+            n = 0, from = nx2_vk_frame;
+        }
+    }
     if (max <= 0 || !s) return 0;
     static int pct = -1;
     if (pct < 0) pct = getenv("NX2_GYRO_STICK") ? atoi(getenv("NX2_GYRO_STICK")) : 100;

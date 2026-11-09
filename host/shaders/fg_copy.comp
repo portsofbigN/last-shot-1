@@ -1,0 +1,15 @@
+#version 450
+// Frame interpolation (nx2_framegen.c), from Hookshot (github.com/NotRexed/Hookshot, gpu/vk/shaders,
+// GPL-3.0-or-later, NotRexed and contributors). Frames are RGB10A2 here (SDR and the HDR10 frame alike).
+// Frame generation (vk_framegen.cpp), after the WebGPU renderer's rx_framegen.cpp: the game's frame copied, as it may
+// be drawn over by the next one. Here also scaled to the window's size (bilinear): the game's 4K frame interpolated at
+// 1440p costs a fraction (size: the processed frame's).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D src;
+layout(binding = 1, rgb10_a2) uniform writeonly image2D dst;
+layout(push_constant) uniform P { ivec2 offset; ivec2 size; } pc;
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, pc.size))) return;
+    imageStore(dst, g, vec4(textureLod(src, (vec2(g) + 0.5) / vec2(pc.size), 0.0).rgb, 1.0));
+}

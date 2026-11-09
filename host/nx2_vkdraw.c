@@ -50,6 +50,8 @@ static VkPhysicalDeviceVulkan12Properties props12 = {VK_STRUCTURE_TYPE_PHYSICAL_
 
 typedef struct Img Img;
 static void destroy_img(Img *m);
+static void img_pool_released(uint64_t base, uint64_t size);
+static void img_evict_idle(uint64_t used, uint64_t budget);
 static Img *rt_image(int i);   // the image colour target i is drawn into
 typedef struct Imp {
     uint64_t base, size;
@@ -1084,6 +1086,7 @@ void nx2_vk_pool_released(uint64_t base, uint64_t size) {
             }
             break;
         }
+    img_pool_released(base, size);
     plat_mutex_unlock(&lock);
 }
 
@@ -1114,6 +1117,8 @@ struct Img {
     VkImageAspectFlags aspect, all_aspect;   // sampled aspect; every aspect (barriers, clears, attachments)
     uint32_t layers, levels, w, h, depth;
     int gpu, uploaded, failed;
+    VkDeviceSize vbytes;   // its video memory
+    uint64_t last_used;    // the present it was last looked up in (img_evict_idle)
     volatile int dirty;          // WriteTexels since the last upload
     uint64_t size, hash, hash_frame;   // CPU storage: contents hash, checked once a frame
     int frozen_ok;                     // unused (kept for the slices below)
@@ -1179,6 +1184,7 @@ static void destroy_img(Img *m) {
     if (m->snap) destroy_img(m->snap);
     if (m->img) vkDestroyImage(D, m->img, NULL);
     if (m->mem) vkFreeMemory(D, m->mem, NULL);
+    if (m->vbytes) img_count--, img_bytes -= m->vbytes;   // (enc / snap images are counted too)
     free(m);
 }
 
@@ -1225,6 +1231,11 @@ static Img *create_img(uint64_t obj, const nvn_texdesc *d, uint8_t *storage) {
         return m;
     }
     m->fmt = m->f.vk;
+    if (m->f.astc_bw) {   // ASTC: BC3 when the GPU decoder encodes it (nx2_astcgpu.c), else RGBA8
+        int nx2_astc_gpu_bc(VkDevice, VkPhysicalDevice, VkBuffer, VkDeviceSize);
+        if (nx2_astc_gpu_bc(D, V->phys, stage_buf, STAGE_SIZE))
+            m->fmt = m->f.astc_srgb ? VK_FORMAT_BC3_SRGB_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK;
+    }
     nvn_texlayout L;
     nvn_tex_layout(d, &L);
     m->levels = d->levels ? d->levels : 1;
@@ -1266,6 +1277,19 @@ static Img *create_img(uint64_t obj, const nvn_texdesc *d, uint8_t *storage) {
         nvn_fmt_bpb(d->format, &bw, &bh);
         if (bw == 1 && !m->f.depth && !m->f.stencil) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     }
+    // RGB9E5 is not a colour attachment format on PC GPUs, but in HDR the game renders its scene's small copies into
+    // RGB9E5 images through R32_UINT views, packing the bits itself: rendering is allowed through views of a format
+    // that can (extended usage). Without it those draws were skipped and the HDR scene was black.
+    if (m->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
+        !(usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+        VkFormatProperties rp;
+        vkGetPhysicalDeviceFormatProperties(V->phys, VK_FORMAT_R32_UINT, &rp);
+        if (rp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) {
+            usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            if (rp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+            flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+        }
+    }
     VkFormat unorm = srgb_to_unorm(m->fmt);
     if (unorm != m->fmt) {   // sRGB images are written as UNORM by compute shaders: a mutable format
         VkFormatProperties up;
@@ -1300,7 +1324,7 @@ static Img *create_img(uint64_t obj, const nvn_texdesc *d, uint8_t *storage) {
                                nx2_vk_memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
     VKCHECK(vkAllocateMemory(D, &ai, NULL, &m->mem));
     VKCHECK(vkBindImageMemory(D, m->img, m->mem, 0));
-    img_count++, img_bytes += mr.size;
+    img_count++, img_bytes += mr.size, m->vbytes = mr.size;
     VkComponentMapping cm = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                              VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
     // the description's swizzle is not baked in: one image serves textures that differ only there, and each binding
@@ -1326,6 +1350,8 @@ static Img *create_img(uint64_t obj, const nvn_texdesc *d, uint8_t *storage) {
         vi.viewType = VK_IMAGE_VIEW_TYPE_2D;   // 3D: slice 0 (the image is 2D-array compatible)
         vi.components = (VkComponentMapping){0};
         vi.subresourceRange = (VkImageSubresourceRange){m->all_aspect, 0, 1, 0, 1};
+        VkImageViewUsageCreateInfo au = {VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, NULL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT};
+        if (m->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) vi.format = VK_FORMAT_R32_UINT, vi.pNext = &au;   // see above
         VKCHECK(vkCreateImageView(D, &vi, NULL, &m->att_view));
     }
     m->layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1369,6 +1395,7 @@ static Img *img_find(uint64_t obj, int create) {
                 *slot = m;
             }
             m->obj = obj;
+            m->last_used = nx2_vk_frame;
             return m;
         }
         variants++;
@@ -1386,6 +1413,7 @@ static Img *img_find(uint64_t obj, int create) {
         else destroy_img(m);   // only when the GPU is idle enough: flush first
     }
     Img *m = create_img(obj, &d, storage);
+    m->last_used = nx2_vk_frame;
     m->next = *slot;
     *slot = m;
     return m;
@@ -1591,7 +1619,13 @@ static void img_upload(Img *m) {
                 int nx2_astc_gpu_band(VkCommandBuffer, VkDeviceSize, uint32_t, uint32_t, uint32_t, uint32_t, int, VkImage,
                                       VkImageAspectFlags, uint32_t, uint32_t, int32_t, int32_t);
                 uint32_t grows = nx2_astc_gpu_rows(D, V->phys, stage_buf, STAGE_SIZE, w) / bh;
+                int bc = m->fmt == VK_FORMAT_BC3_SRGB_BLOCK || m->fmt == VK_FORMAT_BC3_UNORM_BLOCK;
                 if (grows) band = grows;
+                if (bc) {   // BC3: bands start on 4-texel rows (blocks of 5, 6 or 10 rows: a multiple of 4 or 2 of them)
+                    uint32_t k = bh % 4 == 0 ? 1 : bh % 2 == 0 ? 2 : 4;
+                    band = band / k * k;
+                    if (band < k) band = k;
+                }
                 for (uint32_t sl = 0; sl < z; sl++)
                     for (uint32_t br = 0; br < (uint32_t)rows; br += band) {
                         uint32_t nb = (uint32_t)rows - br < band ? (uint32_t)rows - br : band;
@@ -1605,6 +1639,7 @@ static void img_upload(Img *m) {
                                                   level, layer, (int32_t)y0, (int32_t)sl))
                                 continue;
                         }
+                        if (bc) continue;   // a BC3 image takes only the GPU encoder's blocks
                         VkDeviceSize off = stage_alloc((VkDeviceSize)w * hh * 4, 16);
                         astc_band(blocks + sl * pitch * rows + (size_t)br * pitch, pitch, w, hh, m->f.astc_bw, m->f.astc_bh,
                                   m->f.astc_srgb, stage_ptr + off);
@@ -2604,6 +2639,11 @@ static VkImageView att_view_sel(Img *m, RtSel sel, VkFormat *fmt_out) {
         vf = f.vk;
     sel_clamp(m, &sel);
     *fmt_out = m->fmt;
+    if (m->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) {   // rendered to only as R32_UINT (image creation, RGB9E5)
+        if (vf == m->fmt) vf = VK_FORMAT_R32_UINT;
+        *fmt_out = VK_FORMAT_R32_UINT;
+        if (!sel.layer && !sel.level) return m->att_view;
+    }
     if (vf == m->fmt && !sel.layer && !sel.level) return m->att_view;
     for (int i = 0; i < m->natt_sel; i++)
         if (m->att_sel[i].fmt == vf && m->att_sel[i].layer == sel.layer && m->att_sel[i].level == sel.level) {
@@ -2720,6 +2760,67 @@ static int cur_nrt;
 static uint32_t cur_w, cur_h;
 
 static uint32_t lvl_dim(uint32_t d, int level) { return d >> level ? d >> level : 1; }
+
+// Video memory over 3/4 of the budget: the images loaded from the game's memory (never drawn into by the GPU, so
+// they can be loaded again) that no draw used for 30 s are freed. The game frees textures inside its big memory pools
+// without freeing the pools, and their images stayed: a long session of missions filled an 8 GB card (19 fps).
+// NX2_NO_EVICT=1 keeps them. lock held.
+static void img_evict_idle(uint64_t used, uint64_t budget) {
+    static int off = -1, pct = 75;   // NX2_EVICT_AT=<percent of the budget> (tests: 0 frees at every check)
+    if (off < 0) off = getenv("NX2_NO_EVICT") != NULL, pct = getenv("NX2_EVICT_AT") ? atoi(getenv("NX2_EVICT_AT")) : 75;
+    if (off || !budget || used < budget / 100 * (uint64_t)pct || nx2_vk_frame < 1800) return;
+    int n = 0;
+    VkDeviceSize bytes = 0;
+    for (int b = 0; b < IMG_BUCKETS; b++)
+        for (Img **p = &imgs[b]; *p;) {
+            Img *m = *p;
+            int busy = 0;
+            for (int i = 0; i < 8; i++) busy |= cur_rt[i] == m || enc_pending[i] == m;
+            busy |= cur_depth == m || g_bound_tex == m || g_bound_wimg == m;
+            if (busy || m->gpu || m->failed || !m->storage || !m->uploaded || m->enc || m->snap ||
+                m->last_used + 1800 > nx2_vk_frame) {
+                p = &m->next;
+                continue;
+            }
+            *p = m->next;
+            n++, bytes += m->vbytes;
+            if (ndead < (int)(sizeof dead / sizeof *dead)) dead[ndead++] = m;
+            else flush_wait(), destroy_img(m);
+        }
+    rt_log("vkdraw: video memory %.0f of %.0f MiB: %d images unused for 30 s freed (%.1f MiB)", used / 1048576.0,
+           budget / 1048576.0, n, bytes / 1048576.0);
+}
+
+// The game freed a memory pool: the images stored in it go too (with the slot's work, as replaced images do). They
+// were kept before, and each mission load added hundreds of MiB until video memory ran out (19 fps). lock held.
+static void img_pool_released(uint64_t base, uint64_t size) {
+    static int off = -1;
+    if (off < 0) off = getenv("NX2_KEEP_POOL_IMAGES") != NULL;
+    if (off || !size) return;
+    int n = 0;
+    VkDeviceSize bytes = 0;
+    for (int b = 0; b < IMG_BUCKETS; b++)
+        for (Img **p = &imgs[b]; *p;) {
+            Img *m = *p;
+            uintptr_t a = (uintptr_t)m->storage;
+            int busy = 0;
+            for (int i = 0; i < 8; i++) busy |= cur_rt[i] == m || enc_pending[i] == m;
+            busy |= cur_depth == m || g_bound_tex == m || g_bound_wimg == m;
+            if (!m->storage || a < base || a >= base + size || busy) {
+                p = &m->next;
+                continue;
+            }
+            *p = m->next;
+            n++, bytes += m->vbytes;
+            if (ndead < (int)(sizeof dead / sizeof *dead)) dead[ndead++] = m;
+            else flush_wait(), destroy_img(m);
+        }
+    static int nlog;
+    if (n && nlog++ < 40)
+        rt_log("vkdraw: memory pool %#llx (%.1f MiB) released: %d images freed (%.1f MiB); %llu images, %.1f MiB left",
+               (unsigned long long)base, size / 1048576.0, n, bytes / 1048576.0, (unsigned long long)img_count,
+               img_bytes / 1048576.0);
+}
 
 // sel: what each colour target's view selects (format, layer, level); dsel: the depth view's layer and level
 static void begin_rendering(Img **rts, const RtSel *sel, int n, Img *depth, RtSel dsel) {
@@ -4159,6 +4260,17 @@ int nx2_vk_present_texture(uint64_t obj, uint64_t frame) {
         rt_log("vkdraw: %llu draws done, %llu skipped, %llu pipelines (%llu failed), %llu images (%.1f MiB)",
                (unsigned long long)g_draws_done, (unsigned long long)g_draws_skipped, (unsigned long long)pipe_count,
                (unsigned long long)pipe_failed, (unsigned long long)img_count, img_bytes / 1048576.0);
+    if (frame % 600 == 1) {   // video memory in use (the driver's count), to tell a leak from a large scene
+        uint64_t nx2_vk_vram_used(uint64_t *budget);
+        uint64_t budget = 0, used = nx2_vk_vram_used(&budget);
+        if (budget) rt_log("vkdraw: video memory %.0f of %.0f MiB in use", used / 1048576.0, budget / 1048576.0);
+        img_evict_idle(used, budget);
+        if (budget && used > budget - budget / 16) {
+            static int nw;
+            if (nw++ < 4)
+                rt_log("vkdraw: video memory nearly full: the GPU will slow down (lower the console mode, filtering or anti-aliasing)");
+        }
+    }
     plat_mutex_unlock(&lock);
     return ok;
 }

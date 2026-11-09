@@ -29,12 +29,13 @@ If something goes wrong, the last session's log is in `logs\splatoon.log`, next 
 | Image scaling | **AMD FSR 1**, **NVIDIA Image Scaling (NIS)** (sharper) or linear (softer) |
 | Sharpness | How much FSR / NIS sharpen edges: none, medium, high (recommended) or maximum |
 | Frame rate limit | 60 (recommended) or 30. The game counts time in 1/60 s frames: above 60 it would run too fast |
+| Frame generation | Off, 2x, 3x or 4x: frames made between the game's (Hookshot's method), for 120 Hz or faster monitors. Costs a few FPS on the GPU, adds about a frame of delay and can smear fast motion |
 | VSync | Off has less latency; on avoids tearing |
 | Performance overlay | Off, FPS only, or full (FPS, frame times, CPU, GPU, memory) |
 | Controller | Automatic (Xbox, PlayStation, keyboard) or keyboard only |
 | Buttons | Switch positions (A on the right) or Xbox/PlayStation (A at the bottom) |
 | Rumble | Off, weak or strong |
-| Adaptive triggers | DualSense: light resistance on R2 (shoot). L2 stays free |
+| Adaptive triggers | DualSense, on R2 (shoot): light resistance over the whole pull (default), a trigger click halfway down, or off. L2 stays free |
 | Motion aiming | As on the Switch: move the DualSense / DualShock 4 to aim (gyro). Can be turned off |
 | Vertical aim (right stick) | The game aims up and down with controller motion; the right stick does that here. Low, medium or high; turn it off if you disable motion controls in the game's options |
 | Game folder | The game's folder with the `exefs` and `romfs` subfolders (update 65536). Click to choose |

@@ -167,7 +167,7 @@ static HANDLE sony_open(void) {
                     rt_log("pad: %s connected (%s)", kind == 4 ? "DualShock 4" : "DualSense", sony_bt ? "Bluetooth" : "USB");
                     if (kind == 5) {   // adaptive triggers (sent by the rumble thread once the controller is in use)
                         const char *t = getenv("NX2_TRIGGERS");
-                        sony_trigger_pending = !t || strcmp(t, "0");
+                        sony_trigger_pending = !t ? 2 : atoi(t);   // 0 off, 1 weapon click, 2 resistance (default)
                     }
                     h = INVALID_HANDLE_VALUE;
                 }
@@ -296,7 +296,7 @@ static DWORD WINAPI sony_thread(LPVOID arg) {
             sony_state = p;
             plat_mutex_unlock(&sony_lock);
             InterlockedExchange(&sony_connected, 1);
-            if (sony_trigger_pending) sony_trigger_pending = 0, sony_triggers(1);
+            if (sony_trigger_pending) sony_triggers(sony_trigger_pending), sony_trigger_pending = 0;
         }
     }
     return 0;
@@ -393,7 +393,12 @@ static void sony_trigger_write(int on) {
         r[0] = 0x02;
     }
     r[1 + o] = 0x0C;
-    if (on) r[11 + o] = 0x01, r[12 + o] = 0x30, r[13 + o] = 0x50;   // right: resistance from a short way in, light
+    if (on == 2) {   // right: resistance over the whole travel, light
+        r[11 + o] = 0x01, r[12 + o] = 0x30, r[13 + o] = 0x50;
+    } else if (on) {   // right: "weapon" - a click halfway down that gives way, as a gun trigger; free otherwise
+        uint16_t zones = 1u << 3 | 1u << 6;   // from zone 3 to zone 6 of 9
+        r[11 + o] = 0x25, r[12 + o] = (uint8_t)zones, r[13 + o] = (uint8_t)(zones >> 8), r[14 + o] = 4;   // strength 5 of 8
+    }
     if (sony_bt) {
         uint32_t c = crc32_bt(r, 74);
         memcpy(r + 74, &c, 4);
@@ -401,7 +406,7 @@ static void sony_trigger_write(int on) {
     }
     if (sony_write(r, n)) {
         trig_set = on;
-        rt_log("pad: DualSense adaptive triggers %s", on ? "on (R2 resistance)" : "off");
+        rt_log("pad: DualSense adaptive triggers %s", on == 2 ? "on (R2 resistance)" : on ? "on (R2 weapon click)" : "off");
     }
 }
 void nx2_pad_shutdown(void) {   // the window closes: the controller's triggers back to normal

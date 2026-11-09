@@ -29,12 +29,13 @@ em `setup_work\setup.log`).
 | Escala da imagem | **AMD FSR 1**, **NVIDIA Image Scaling (NIS)** (mais nítidos) ou linear (mais suave) |
 | Nitidez | Quanto o FSR / NIS realçam os contornos: nenhuma, média, alta (recomendado) ou máxima |
 | Limite de FPS | 60 (recomendado) ou 30. O jogo conta o tempo em quadros de 1/60 s: acima de 60 ele ficaria acelerado |
+| Geração de quadros | Desligada, 2x, 3x ou 4x: quadros criados entre os do jogo (método do Hookshot), para monitores de 120 Hz ou mais. Custa alguns FPS na GPU, atrasa cerca de um quadro e pode borrar movimentos rápidos |
 | VSync | Desligado tem menos atraso; ligado evita "tearing" |
 | Overlay de desempenho | Desligado, só FPS, ou completo (FPS, tempos, CPU, GPU, memória) |
 | Controle | Automático (Xbox, PlayStation, teclado) ou só teclado |
 | Botões | Posição do Switch (A à direita) ou Xbox/PlayStation (A embaixo) |
 | Vibração | Desligada, fraca ou forte |
-| Gatilhos adaptativos | DualSense: resistência leve no R2 (atirar). O L2 continua livre |
+| Gatilhos adaptativos | DualSense, no R2 (atirar): resistência leve no curso todo (padrão), um clique de gatilho no meio do curso, ou desligados. O L2 continua livre |
 | Mira por movimento | Como no Switch: mova o DualSense / DualShock 4 para mirar (giroscópio). Pode desligar |
 | Mira vertical (analógico R) | O jogo mira para cima e para baixo com o movimento do controle; aqui o analógico direito faz esse papel. Baixa, média ou alta; desligue se tirar os controles de movimento nas opções do jogo |
 | Pasta do jogo | A pasta do jogo com as subpastas `exefs` e `romfs` (atualização 65536). Clique para escolher |
