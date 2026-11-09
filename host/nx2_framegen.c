@@ -58,6 +58,10 @@ static struct {
     int thread_started;
 } F;
 
+static volatile LONG shown_fps;   // frames shown in the last second (display thread)
+int nx2_fg_mult(void);
+int nx2_fg_shown_fps(void) { return nx2_fg_mult() > 1 && !F.failed ? (int)shown_fps : 0; }
+
 int nx2_fg_mult(void) {   // NX2_FRAMEGEN: 1 (or unset) off, 2..4 the multiplier
     static int m = -1;
     if (m < 0) {
@@ -286,6 +290,16 @@ static DWORD WINAPI display_main(void *arg) {
             while (now_ns() < due) SwitchToThread();
             int64_t t = now_ns();
             nx2_vk_show_frame(set->frame[k].image, set->frame[k].view, F.w, F.h);
+            {   // frames shown per second (the overlay's "on screen" figure)
+                static int64_t sec_at;
+                static int sec_n;
+                sec_n++;
+                if (!sec_at) sec_at = t;
+                if (t - sec_at >= 1000000000LL) {
+                    InterlockedExchange(&shown_fps, (LONG)((double)sec_n * 1e9 / (double)(t - sec_at) + 0.5));
+                    sec_at = t, sec_n = 0;
+                }
+            }
             {   // NX2_FG_SHOT=<game frame> (tests): the first made frame after that present, as fg_shot.png
                 static int64_t want = -2;
                 if (want == -2) want = getenv("NX2_FG_SHOT") ? atoll(getenv("NX2_FG_SHOT")) : -1;

@@ -84,7 +84,11 @@ static double srgb_to_linear(double v) { return v <= 0.04045 ? v / 12.92 : pow((
 void nx2_hdr_overlay(uint32_t *px, size_t n) {
     static uint16_t lut[256];
     if (!lut[255])
-        for (int i = 0; i < 256; i++) lut[i] = (uint16_t)lround(pq_encode(srgb_to_linear(i / 255.0) * 203.0) * 1023.0);
+        for (int i = 0; i < 256; i++) {   // at the game's white (NX2_HDR_WHITE, nx2_gfx.c)
+            double white = getenv("NX2_HDR_WHITE") ? atof(getenv("NX2_HDR_WHITE")) : 203.0;
+            white = white < 80 ? 80 : white > 500 ? 500 : white;
+            lut[i] = (uint16_t)lround(pq_encode(srgb_to_linear(i / 255.0) * white) * 1023.0);
+        }
     for (size_t i = 0; i < n; i++) {
         uint32_t v = px[i], b = v & 255, g = v >> 8 & 255, r = v >> 16 & 255, a = v >> 24;
         px[i] = lut[r] | (uint32_t)lut[g] << 10 | (uint32_t)lut[b] << 20 | (a >= 128 ? 3u : a >= 64 ? 2u : a ? 1u : 0u) << 30;
@@ -104,17 +108,28 @@ void nx2_hdr_to_srgb8(uint8_t *p, size_t n) {
         }
         ready = 1;
     }
-    uint32_t mx = 0;
-    size_t over = 0;
+    uint32_t mx = 0, mn = 1023;
+    size_t over = 0, hist[1024] = {0};
+    double sum = 0;
     for (size_t i = 0; i < n; i++) {
         uint32_t v0;
         memcpy(&v0, p + i * 4, 4);
         uint32_t c = v0 & 1023, c1 = v0 >> 10 & 1023, c2 = v0 >> 20 & 1023;
         c = c > c1 ? c : c1, c = c > c2 ? c : c2;
-        mx = c > mx ? c : mx;
+        mx = c > mx ? c : mx, mn = c < mn ? c : mn;
         over += lin[c] > 1.0f;
+        hist[c]++, sum += lin[c] * 203.0;
     }
-    rt_log("hdr: shot: brightest %.0f nits, %.1f%% of the picture above SDR white", lin[mx] * 203.0, 100.0 * over / (double)n);
+    size_t acc = 0;
+    uint32_t p1 = 0, p50 = 0;
+    for (uint32_t c = 0; c < 1024; c++) {
+        acc += hist[c];
+        if (!p1 && acc >= n / 100) p1 = c ? c : 1;
+        if (!p50 && acc >= n / 2) p50 = c ? c : 1;
+    }
+    rt_log("hdr: shot: brightest %.0f nits, darkest %.3f nits (1%% darker than %.2f), median %.0f, mean %.0f; %.1f%% above "
+           "SDR white", lin[mx] * 203.0, lin[mn] * 203.0, lin[p1] * 203.0, lin[p50] * 203.0, sum / (double)n,
+           100.0 * over / (double)n);
     for (size_t i = 0; i < n; i++) {
         uint32_t v;
         memcpy(&v, p + i * 4, 4);

@@ -25,6 +25,7 @@ If something goes wrong, the last session's log is in `logs\splatoon.log`, next 
 | Window size | 1280x720 up to 3840x2160. Your monitor's own size opens fullscreen; larger than the screen, the window shrinks to fit. The picture keeps 16:9 (black bars in a window of another shape) |
 | Display mode | Windowed or borderless fullscreen |
 | HDR | The game's own HDR10 picture. Needs an HDR monitor with HDR on in Windows (Settings > Display > Use HDR) |
+| HDR brightness | How bright ordinary white is in HDR (203 to 400 nits). Raise it if the picture looks dull or greyish |
 | Console mode | **TV**: the game renders a 4K picture (best looking). **Handheld**: 1280x720 (lighter) |
 | Image scaling | **AMD FSR 1**, **NVIDIA Image Scaling (NIS)** (sharper) or linear (softer) |
 | Sharpness | How much FSR / NIS sharpen edges: none, medium, high (recommended) or maximum |
@@ -35,9 +36,9 @@ If something goes wrong, the last session's log is in `logs\splatoon.log`, next 
 | Controller | Automatic (Xbox, PlayStation, keyboard) or keyboard only |
 | Buttons | Switch positions (A on the right) or Xbox/PlayStation (A at the bottom) |
 | Rumble | Off, weak or strong |
-| Adaptive triggers | DualSense, on R2 (shoot): light resistance over the whole pull (default), a trigger click halfway down, or off. L2 stays free |
+| Adaptive triggers | DualSense, on R2 (shoot): light resistance over the whole pull (default), a trigger click halfway down, or off. Only active while you control the character. L2 stays free |
 | Motion aiming | As on the Switch: move the DualSense / DualShock 4 to aim (gyro). Can be turned off |
-| Vertical aim (right stick) | The game aims up and down with controller motion; the right stick does that here. Low, medium or high; turn it off if you disable motion controls in the game's options |
+| Vertical aim (right stick) | Automatic (default): on a DualSense / DualShock 4 only the gyro aims, as on the console; without one (Xbox, keyboard) the right stick stands in. Low, medium or high force the stick on any controller; turn it off if you disable motion controls in the game's options |
 | Game folder | The game's folder with the `exefs` and `romfs` subfolders (update 65536). Click to choose |
 | Check for updates | The launcher asks GitHub whether a new version is out and says so on its main page (nothing is downloaded by itself) |
 | Language | Portuguese or English (automatic follows Windows); for the menu and the overlay |

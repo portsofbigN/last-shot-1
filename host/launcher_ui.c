@@ -20,8 +20,8 @@
 
 #include "nx2_cfg.h"
 
-#define APP_VERSION "1.0.0"
-#define APP_VERSION_W L"1.0.0"
+#define APP_VERSION "0.0.3"
+#define APP_VERSION_W L"0.0.3"
 static char upd_tag[64], upd_url[300];   // a newer release found by update_thread
 #define SUPPORTED_VERSION "65536"
 #define SUPPORTED_TITLE "0400380020056000"
@@ -990,7 +990,7 @@ static void paint_main(HWND h) {
 // ---- update check: the latest release of UPDATE_REPO on GitHub, asked once at start in the background (setting
 // "updates"). A newer tag than APP_VERSION shows a banner on the Play page with a button to its download page.
 #ifndef UPDATE_REPO
-#define UPDATE_REPO ""   // "owner/name" of the GitHub repository; empty: no check
+#define UPDATE_REPO "portsofbigN/last-shot-1"   // "owner/name" of the GitHub repository; empty: no check
 #endif
 #define WM_APP_UPDATE (WM_APP + 9)
 static int ver_newer(const char *tag, const char *cur) {   // "v1.2.3" against "1.2.0"

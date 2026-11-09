@@ -203,6 +203,7 @@ static void record(uint64_t b, int32_t ax, int32_t ay, int32_t bx, int32_t by) {
     state = st, from = now;
 }
 
+volatile LONG64 nx2_hid_play_input_ns;   // when the player last moved or acted (0: never)
 static int key(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
 static void poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
@@ -332,6 +333,8 @@ static void poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32
             if (sb & S_RS_LEFT) bx = -full;
             if (sb & S_RS_RIGHT) bx = full;
         }
+    if (ax || ay || (b & (B_ZL | B_ZR | B_L | B_R | B_B | B_X | B_Y)))   // moving or acting: in control (nx2_pad.c triggers)
+        InterlockedExchange64(&nx2_hid_play_input_ns, (LONG64)plat_now_ns());
     // stick directions as buttons (bits 16-19 left stick, 20-23 right stick), as the controller reports them
     const int32_t t = 16384;
     if (ax < -t) b |= 1u << 16;
@@ -559,7 +562,10 @@ static int six_fill(SixAxisState *s, int max) {
     }
     if (max <= 0 || !s) return 0;
     static int pct = -1;
-    if (pct < 0) pct = getenv("NX2_GYRO_STICK") ? atoi(getenv("NX2_GYRO_STICK")) : 100;
+    if (pct < 0) {   // no gyro: the stick stands in for it (auto / unset: 100)
+        const char *e = getenv("NX2_GYRO_STICK");
+        pct = e && strcmp(e, "auto") ? atoi(e) : 100;
+    }
     // The samples go through the sensor fusion (motion_fusion.c), so direction, angle, rotation and gravity agree as a
     // real controller's do: the stick tilts the controller about its x axis (top edge up for the stick up).
     int nx2_pad_has_motion(void);

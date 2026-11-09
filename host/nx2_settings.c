@@ -48,9 +48,9 @@ static const char *const e_rumble[] = {"Off", "Weak", "Strong"};
 static const char *const v_motion[] = {"1", "0"};
 static const char *const n_motion[] = {"Ligada (DualSense / DualShock 4)", "Desligada"};
 static const char *const e_motion[] = {"On (DualSense / DualShock 4)", "Off"};
-static const char *const v_gyro[] = {"0", "50", "100", "150"};
-static const char *const n_gyro[] = {"Desligada", "Baixa", "Média", "Alta"};
-static const char *const e_gyro[] = {"Off", "Low", "Medium", "High"};
+static const char *const v_gyro[] = {"auto", "0", "50", "100", "150"};
+static const char *const n_gyro[] = {"Automática (padrão)", "Desligada", "Baixa", "Média", "Alta"};
+static const char *const e_gyro[] = {"Automatic (default)", "Off", "Low", "Medium", "High"};
 static const char *const n_launch[] = {"Não", "Sim"};
 static const char *const e_launch[] = {"No", "Yes"};
 static const char *const v_mode[] = {"docked", "handheld"};
@@ -82,6 +82,11 @@ static const char *const e_trig[] = {"Resistance over the whole pull (default)",
 static const char *const v_fg[] = {"1", "2", "3", "4"};
 static const char *const n_fg[] = {"Desligada", "2x (60 → 120 FPS)", "3x (60 → 180 FPS)", "4x (60 → 240 FPS)"};
 static const char *const e_fg[] = {"Off", "2x (60 → 120 FPS)", "3x (60 → 180 FPS)", "4x (60 → 240 FPS)"};
+static const char *const v_hdrw[] = {"203", "250", "300", "350", "400"};
+static const char *const n_hdrw[] = {"Padrão (203 nits)", "Mais claro (250 nits)", "Claro (300 nits)", "Bem claro (350 nits)",
+                                     "Máximo (400 nits)"};
+static const char *const e_hdrw[] = {"Standard (203 nits)", "Brighter (250 nits)", "Bright (300 nits)", "Very bright (350 nits)",
+                                     "Maximum (400 nits)"};
 static const char *const v_hdr[] = {"0", "1"};
 static const char *const n_hdr[] = {"Desligado", "Ligado (monitor HDR)"};
 static const char *const e_hdr[] = {"Off", "On (HDR monitor)"};
@@ -105,6 +110,11 @@ static Setting settings[] = {
       "(Configurações > Tela > Usar HDR); com o HDR do Windows desligado, o jogo continua em SDR.",
       "The game renders an HDR10 picture with brighter highlights. Needs an HDR monitor with HDR on in Windows "
       "(Settings > Display > Use HDR); with Windows HDR off the game stays SDR."}},
+    {"hdr_white", "NX2_HDR_WHITE", "203", {"Brilho do HDR", "HDR brightness"}, v_hdrw, {n_hdrw, e_hdrw}, 5, CAT_DISPLAY,
+     {"Quão claro fica o branco comum do jogo em HDR. Se a imagem parecer apagada ou acinzentada (comum em monitores "
+      "HDR400), aumente. Os pretos continuam pretos.",
+      "How bright the game's ordinary white is in HDR. If the picture looks dull or greyish (common on HDR400 monitors), "
+      "raise it. Blacks stay black."}},
     {"upscaler", "NX2_UPSCALER", "fsr", {"Escala da imagem", "Image scaling"}, v_scaler, {n_scaler, e_scaler}, 3, CAT_IMAGE,
      {"Como a imagem é ampliada: AMD FSR 1 ou NVIDIA Image Scaling (mais nítidos) ou linear (mais suave).",
       "How the picture is upscaled: AMD FSR 1 or NVIDIA Image Scaling (sharper) or linear (softer)."}},
@@ -167,10 +177,14 @@ static Setting settings[] = {
     {"motion", "NX2_GYRO", "1", {"Mira por movimento", "Motion aiming"}, v_motion, {n_motion, e_motion}, 2, CAT_PAD,
      {"Como no Switch: mova o controle para mirar (giroscópio do DualSense / DualShock 4). Outros controles usam o analógico R.",
       "As on the Switch: move the controller to aim (DualSense / DualShock 4 gyro). Other controllers use the right stick."}},
-    {"aim_stick", "NX2_GYRO_STICK", "100", {"Mira vertical (analógico R)", "Vertical aim (right stick)"}, v_gyro,
-     {n_gyro, e_gyro}, 4, CAT_PAD,
-     {"O jogo mira para cima e para baixo com o movimento do controle; o analógico R faz esse papel. Desligue se tirar os controles de movimento no jogo.",
-      "The game aims up and down with controller motion; the right stick does that here. Turn it off if you disable motion controls in the game."}},
+    {"aim_stick", "NX2_GYRO_STICK", "auto", {"Mira vertical (analógico R)", "Vertical aim (right stick)"}, v_gyro,
+     {n_gyro, e_gyro}, 5, CAT_PAD,
+     {"O jogo mira para cima e para baixo com o movimento do controle. Automática: no DualSense / DualShock 4 só o "
+      "giroscópio mira, como no console; em controles sem giroscópio (Xbox, teclado) o analógico R faz esse papel. Os "
+      "outros valores forçam o analógico em qualquer controle, ou o desligam.",
+      "The game aims up and down with controller motion. Automatic: on a DualSense / DualShock 4 only the gyro aims, as "
+      "on the console; on controllers without one (Xbox, keyboard) the right stick stands in. The other values force "
+      "the stick on any controller, or turn it off."}},
     {"game_dir", "NX2_GAME_DIR", "", {"Pasta do jogo", "Game folder"}, NULL, {NULL, NULL}, 0, CAT_GENERAL,
      {"Pasta com as subpastas exefs e romfs do jogo (atualização 65536). Clique para escolher.",
       "Folder with the game's exefs and romfs subfolders (update 65536). Click to choose."}},

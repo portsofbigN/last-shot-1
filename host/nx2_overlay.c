@@ -114,7 +114,14 @@ static void render(uint32_t win_w, uint32_t win_h, uint32_t img_w, uint32_t img_
     box_w = 0;
     int y = (int)(font_px / 3);
     COLORREF fc = fps >= 57 ? RGB(110, 240, 120) : fps >= 45 ? RGB(250, 220, 90) : RGB(255, 100, 90);
-    line(&y, fc, "FPS %5.1f   %5.2f ms", fps, avg);
+    {   // with frame generation the game's frames and the frames on screen are different numbers
+        int nx2_fg_shown_fps(void);
+        int shown = nx2_fg_shown_fps();
+        static int lang_en = -1;
+        if (lang_en < 0) lang_en = getenv("NX2_UI_LANG") && !strcmp(getenv("NX2_UI_LANG"), "en");
+        if (shown > 0) line(&y, fc, lang_en ? "FPS %5.1f   %5.2f ms   %d on screen" : "FPS %5.1f   %5.2f ms   %d na tela", fps, avg, shown);
+        else line(&y, fc, "FPS %5.1f   %5.2f ms", fps, avg);
+    }
     if (m == 2 && t0) {
         SYSTEM_INFO si;
         GetSystemInfo(&si);

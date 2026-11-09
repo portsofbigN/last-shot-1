@@ -4,8 +4,8 @@
 1 24 "launcher.manifest"
 
 1 VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION 0,0,3,0
+PRODUCTVERSION 0,0,3,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -18,12 +18,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Splatoon Raiders Recomp project"
             VALUE "FileDescription", "Splatoon Raiders Recomp Launcher (settings and shader preparation)"
-            VALUE "FileVersion", "1.0.0.0"
+            VALUE "FileVersion", "0.0.3.0"
             VALUE "InternalName", "Launcher"
             VALUE "LegalCopyright", "GPL-3.0-or-later"
             VALUE "OriginalFilename", "Launcher.exe"
             VALUE "ProductName", "Splatoon Raiders Recomp"
-            VALUE "ProductVersion", "1.0.0.0"
+            VALUE "ProductVersion", "0.0.3.0"
         END
     END
     BLOCK "VarFileInfo"

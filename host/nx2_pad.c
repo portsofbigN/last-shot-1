@@ -72,7 +72,7 @@ static int xinput_read(XPad *p) {
 static PlatMutex sony_lock;
 static XPad sony_state;
 static volatile LONG sony_connected;
-static int sony_trigger_pending;   // a DualSense just connected: its adaptive triggers to set
+static int trig_mode, trig_cur;   // the adaptive trigger effect chosen; the one the controller has now
 static void sony_triggers(int on);
 static HANDLE sony_handle = INVALID_HANDLE_VALUE;
 static int sony_kind, sony_bt;   // 4 DualShock 4, 5 DualSense; Bluetooth
@@ -165,9 +165,10 @@ static HANDLE sony_open(void) {
                     found = h;
                     wcsncpy(sony_path, d->DevicePath, 511);
                     rt_log("pad: %s connected (%s)", kind == 4 ? "DualShock 4" : "DualSense", sony_bt ? "Bluetooth" : "USB");
-                    if (kind == 5) {   // adaptive triggers (sent by the rumble thread once the controller is in use)
+                    if (kind == 5) {   // adaptive triggers (NX2_TRIGGERS: 0 off, 1 weapon click, 2 resistance, the default)
                         const char *t = getenv("NX2_TRIGGERS");
-                        sony_trigger_pending = !t ? 2 : atoi(t);   // 0 off, 1 weapon click, 2 resistance (default)
+                        trig_mode = !t ? 2 : atoi(t);
+                        trig_cur = 0;
                     }
                     h = INVALID_HANDLE_VALUE;
                 }
@@ -194,7 +195,10 @@ int nx2_pad_has_motion(void) {
 static void sony_motion(const uint8_t *r, DWORD n, uint64_t when) {
     static int off = -1, stick = -1;
     if (off < 0) off = getenv("NX2_GYRO") && *getenv("NX2_GYRO") == '0';
-    if (stick < 0) stick = getenv("NX2_GYRO_STICK") ? atoi(getenv("NX2_GYRO_STICK")) : 100;
+    if (stick < 0) {   // a real gyro: the stick is not added to it unless asked (auto / unset: 0)
+        const char *e = getenv("NX2_GYRO_STICK");
+        stick = e && strcmp(e, "auto") ? atoi(e) : 0;
+    }
     if (off) return;
     const uint8_t *d = NULL;   // the report's data after the id (and the Bluetooth header)
     int g = 0, a = 0;
@@ -296,7 +300,13 @@ static DWORD WINAPI sony_thread(LPVOID arg) {
             sony_state = p;
             plat_mutex_unlock(&sony_lock);
             InterlockedExchange(&sony_connected, 1);
-            if (sony_trigger_pending) sony_triggers(sony_trigger_pending), sony_trigger_pending = 0;
+            if (trig_mode) {   // the effect only while the player is in control: cutscenes, loads and menus leave the
+                // trigger free (the game gives no sign of them; the stick and the action buttons are the sign)
+                extern volatile LONG64 nx2_hid_play_input_ns;
+                int64_t last = (int64_t)nx2_hid_play_input_ns;
+                int want = last && plat_now_ns() - (uint64_t)last < 5000000000ull ? trig_mode : 0;
+                if (want != trig_cur) trig_cur = want, sony_triggers(want);
+            }
         }
     }
     return 0;

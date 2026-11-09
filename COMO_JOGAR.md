@@ -25,6 +25,7 @@ em `setup_work\setup.log`).
 | Resolução da janela | Tamanho da janela (1280x720 até 3840x2160). O tamanho do seu monitor abre em tela cheia; maior que a tela, a janela se ajusta. A imagem mantém 16:9 (faixas pretas se a janela tiver outro formato) |
 | Modo de exibição | Janela ou tela cheia sem bordas |
 | HDR | Imagem HDR10 do próprio jogo. Precisa de monitor HDR e do HDR ligado no Windows (Configurações > Tela > Usar HDR) |
+| Brilho do HDR | Quão claro fica o branco comum em HDR (203 a 400 nits). Aumente se a imagem parecer apagada ou acinzentada |
 | Modo do console | **TV**: o jogo gera imagem 4K (mais bonito). **Portátil**: 1280x720 (mais leve) |
 | Escala da imagem | **AMD FSR 1**, **NVIDIA Image Scaling (NIS)** (mais nítidos) ou linear (mais suave) |
 | Nitidez | Quanto o FSR / NIS realçam os contornos: nenhuma, média, alta (recomendado) ou máxima |
@@ -35,9 +36,9 @@ em `setup_work\setup.log`).
 | Controle | Automático (Xbox, PlayStation, teclado) ou só teclado |
 | Botões | Posição do Switch (A à direita) ou Xbox/PlayStation (A embaixo) |
 | Vibração | Desligada, fraca ou forte |
-| Gatilhos adaptativos | DualSense, no R2 (atirar): resistência leve no curso todo (padrão), um clique de gatilho no meio do curso, ou desligados. O L2 continua livre |
+| Gatilhos adaptativos | DualSense, no R2 (atirar): resistência leve no curso todo (padrão), um clique de gatilho no meio do curso, ou desligados. Só age enquanto você controla o personagem. O L2 continua livre |
 | Mira por movimento | Como no Switch: mova o DualSense / DualShock 4 para mirar (giroscópio). Pode desligar |
-| Mira vertical (analógico R) | O jogo mira para cima e para baixo com o movimento do controle; aqui o analógico direito faz esse papel. Baixa, média ou alta; desligue se tirar os controles de movimento nas opções do jogo |
+| Mira vertical (analógico R) | Automática (padrão): no DualSense / DualShock 4 só o giroscópio mira, como no console; sem giroscópio (Xbox, teclado) o analógico direito faz esse papel. Baixa, média ou alta forçam o analógico em qualquer controle; desligue se tirar os controles de movimento nas opções do jogo |
 | Pasta do jogo | A pasta do jogo com as subpastas `exefs` e `romfs` (atualização 65536). Clique para escolher |
 | Procurar atualizações | O launcher pergunta ao GitHub se saiu versão nova e avisa na tela inicial (nada é baixado sozinho) |
 | Idioma | Português ou inglês (automático segue o idioma do Windows); vale para o menu e o overlay |

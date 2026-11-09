@@ -84,7 +84,10 @@ static void ov_vi_hdr_status(Cpu *c) {
 // Result QueryDisplayHdrPaperWhite(uint16_t *nits, const Display *): the brightness of SDR white in HDR
 static void ov_vi_paper_white(Cpu *c) {
     uint16_t *nits = (uint16_t *)(uintptr_t)c->x[0];
-    if (nits) *nits = 203;
+    // NX2_HDR_WHITE=<nits> (the HDR brightness setting): the brightness of the game's ordinary white
+    const char *e = getenv("NX2_HDR_WHITE");
+    int w = e ? atoi(e) : 203;
+    if (nits) *nits = (uint16_t)(w < 80 ? 80 : w > 500 ? 500 : w);
     c->x[0] = 0;
 }
 
