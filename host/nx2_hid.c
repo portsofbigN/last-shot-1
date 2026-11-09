@@ -145,6 +145,19 @@ static void script_load(void) {
 extern uint64_t nx2_vk_frame;
 HWND nx2_vk_hwnd(void);
 
+// The clock input scripts run on: the present number, or with NX2_SCRIPT_TIME=1 (tests at other frame rates) the
+// time since the first present in 1/60 s steps, so one script plays the same at 60 and 120 FPS.
+uint64_t nx2_script_clock(void) {
+    static int mode = -1;
+    static uint64_t t0;
+    if (mode < 0) mode = getenv("NX2_SCRIPT_TIME") != NULL;
+    if (!mode) return nx2_vk_frame;
+    if (!nx2_vk_frame) return 0;
+    uint64_t now = plat_now_ns();
+    if (!t0) t0 = now;
+    return 1 + (now - t0) * 60 / 1000000000ull;
+}
+
 // NX2_INPUT_RECORD=<file>: the real input (keyboard, controller) written as script steps "from-to:Btn+Btn;", one per
 // change of state, so a played route replays with NX2_INPUT_SCRIPT_FILE. Stick directions past half deflection are
 // recorded full, smaller ones (past the dead zone) with Slow.
@@ -304,8 +317,9 @@ static void poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32
             }
         }
     }
+    uint64_t clk = nx2_script_clock();
     for (int i = 0; i < nscript; i++)
-        if (nx2_vk_frame >= script[i].from && nx2_vk_frame <= script[i].to) {
+        if (clk >= script[i].from && clk <= script[i].to) {
             uint64_t sb = script[i].buttons;
             b |= sb & ~(0x1ffull << 55);
             int32_t full = sb & S_SLOW ? 8192 : 32767;

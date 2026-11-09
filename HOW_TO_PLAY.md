@@ -24,23 +24,33 @@ If something goes wrong, the last session's log is in `logs\splatoon.log`, next 
 |---|---|
 | Window size | 1280x720 up to 3840x2160. Your monitor's own size opens fullscreen; larger than the screen, the window shrinks to fit. The picture keeps 16:9 (black bars in a window of another shape) |
 | Display mode | Windowed or borderless fullscreen |
+| HDR | The game's own HDR10 picture. Needs an HDR monitor with HDR on in Windows (Settings > Display > Use HDR) |
 | Console mode | **TV**: the game renders a 4K picture (best looking). **Handheld**: 1280x720 (lighter) |
 | Image scaling | **AMD FSR 1**, **NVIDIA Image Scaling (NIS)** (sharper) or linear (softer) |
 | Sharpness | How much FSR / NIS sharpen edges: none, medium, high (recommended) or maximum |
-| Frame rate limit | 30, 60 (recommended), 120 (experimental) or unlimited |
+| Frame rate limit | 60 (recommended) or 30. The game counts time in 1/60 s frames: above 60 it would run too fast |
 | VSync | Off has less latency; on avoids tearing |
 | Performance overlay | Off, FPS only, or full (FPS, frame times, CPU, GPU, memory) |
 | Controller | Automatic (Xbox, PlayStation, keyboard) or keyboard only |
 | Buttons | Switch positions (A on the right) or Xbox/PlayStation (A at the bottom) |
 | Rumble | Off, weak or strong |
+| Adaptive triggers | DualSense: light resistance on R2 (shoot). L2 stays free |
 | Motion aiming | As on the Switch: move the DualSense / DualShock 4 to aim (gyro). Can be turned off |
 | Vertical aim (right stick) | The game aims up and down with controller motion; the right stick does that here. Low, medium or high; turn it off if you disable motion controls in the game's options |
 | Game folder | The game's folder with the `exefs` and `romfs` subfolders (update 65536). Click to choose |
+| Check for updates | The launcher asks GitHub whether a new version is out and says so on its main page (nothing is downloaded by itself) |
 | Language | Portuguese or English (automatic follows Windows); for the menu and the overlay |
 | Show this menu at start | "No" opens the game directly. Hold **Shift** while opening to see the menu again |
 
 Choices are saved in `splatoon.ini` next to the program (it can be edited by hand). Saves are in the `profile`
 folder, also next to the program.
+
+**Importing a save:** under **Play > Setup**, **Import save** finds the game's save in Eden, yuzu and its forks by
+itself, or takes a folder with `save.dat` (a save dumped from the console, for example). The previous save is kept in
+`profile/save-backup`.
+
+**If the game closes on an error**, the launcher shows the error and the path of `logs/splatoon.log`, the file to
+attach when reporting it.
 
 ## Performance and resolution
 

@@ -72,6 +72,8 @@ static int xinput_read(XPad *p) {
 static PlatMutex sony_lock;
 static XPad sony_state;
 static volatile LONG sony_connected;
+static int sony_trigger_pending;   // a DualSense just connected: its adaptive triggers to set
+static void sony_triggers(int on);
 static HANDLE sony_handle = INVALID_HANDLE_VALUE;
 static int sony_kind, sony_bt;   // 4 DualShock 4, 5 DualSense; Bluetooth
 static DWORD sony_in_len;        // bytes of one input report (a read returns every report queued since the last)
@@ -163,6 +165,10 @@ static HANDLE sony_open(void) {
                     found = h;
                     wcsncpy(sony_path, d->DevicePath, 511);
                     rt_log("pad: %s connected (%s)", kind == 4 ? "DualShock 4" : "DualSense", sony_bt ? "Bluetooth" : "USB");
+                    if (kind == 5) {   // adaptive triggers (sent by the rumble thread once the controller is in use)
+                        const char *t = getenv("NX2_TRIGGERS");
+                        sony_trigger_pending = !t || strcmp(t, "0");
+                    }
                     h = INVALID_HANDLE_VALUE;
                 }
             }
@@ -290,6 +296,7 @@ static DWORD WINAPI sony_thread(LPVOID arg) {
             sony_state = p;
             plat_mutex_unlock(&sony_lock);
             InterlockedExchange(&sony_connected, 1);
+            if (sony_trigger_pending) sony_trigger_pending = 0, sony_triggers(1);
         }
     }
     return 0;
@@ -312,12 +319,18 @@ static volatile LONG rumble_want = -1;   // strong << 8 | weak, waiting to be se
 static HANDLE rumble_ev;
 
 static void sony_rumble_write(uint8_t strong, uint8_t weak);
+static void sony_trigger_write(int on);
+// DualSense adaptive triggers (NX2_TRIGGERS, default 1): R2 (ZR, shooting) gets a light resistance over its travel, as
+// a weapon trigger; L2 (ZL, squid form) stays free. Set once per connection, through the rumble thread; cleared when
+// the game window closes (nx2_pad_shutdown), since the controller keeps an effect until told otherwise.
+static volatile LONG trig_want = -1, trig_set;
 
 static DWORD WINAPI rumble_thread(LPVOID unused) {
     (void)unused;
     for (;;) {
         WaitForSingleObject(rumble_ev, INFINITE);
         LONG v;
+        if ((v = InterlockedExchange(&trig_want, -1)) >= 0) sony_trigger_write((int)v);
         while ((v = InterlockedExchange(&rumble_want, -1)) >= 0) {
             static int nslow;
             ULONGLONG t0 = GetTickCount64();
@@ -329,18 +342,70 @@ static DWORD WINAPI rumble_thread(LPVOID unused) {
     return 0;
 }
 
+static int rumble_start(void) {   // the rumble thread, once; 0 when it cannot run
+    static int ok = -1;
+    if (ok < 0) {
+        rumble_ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+        ok = rumble_ev && CreateThread(NULL, 0, rumble_thread, NULL, 0, NULL);
+    }
+    return ok;
+}
+static void sony_triggers(int on) {
+    if (!rumble_start()) return;
+    InterlockedExchange(&trig_want, on);
+    SetEvent(rumble_ev);
+}
+
 static void sony_rumble(uint8_t strong, uint8_t weak) {   // USB and Bluetooth: handed to the rumble thread
     if (!sony_connected || (sony_ex[0] == strong && sony_ex[1] == weak)) return;
     sony_ex[0] = strong, sony_ex[1] = weak;
-    if (!rumble_ev) {
-        rumble_ev = CreateEventW(NULL, FALSE, FALSE, NULL);
-        if (!rumble_ev || !CreateThread(NULL, 0, rumble_thread, NULL, 0, NULL)) {
-            sony_rumble_write(strong, weak);
-            return;
-        }
+    if (!rumble_start()) {
+        sony_rumble_write(strong, weak);
+        return;
     }
     InterlockedExchange(&rumble_want, (LONG)strong << 8 | weak);
     SetEvent(rumble_ev);
+}
+
+static int sony_write(uint8_t *r, DWORD n) {
+    if (sony_out == INVALID_HANDLE_VALUE)
+        sony_out = CreateFileW(sony_path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    DWORD done;
+    if (sony_out != INVALID_HANDLE_VALUE && !WriteFile(sony_out, r, n, &done, NULL)) {
+        CloseHandle(sony_out);   // unplugged: opened again with the next controller
+        sony_out = INVALID_HANDLE_VALUE;
+        return 0;
+    }
+    return sony_out != INVALID_HANDLE_VALUE;
+}
+// The trigger effects (DualSense output report: valid flags 0x04 right / 0x08 left trigger; 11 bytes each, mode 0x01
+// "continuous resistance": start position, force; mode 0x00 off)
+static void sony_trigger_write(int on) {
+    if (sony_kind != 5) return;
+    uint8_t r[80] = {0};
+    int o = sony_bt ? 2 : 0;   // Bluetooth: report id, sequence and tag before the same fields
+    DWORD n = 48;
+    if (sony_bt) {
+        static uint8_t seq;
+        r[0] = 0x31, r[1] = (uint8_t)(seq << 4), r[2] = 0x10;
+        seq = (seq + 1) & 15;
+    } else {
+        r[0] = 0x02;
+    }
+    r[1 + o] = 0x0C;
+    if (on) r[11 + o] = 0x01, r[12 + o] = 0x30, r[13 + o] = 0x50;   // right: resistance from a short way in, light
+    if (sony_bt) {
+        uint32_t c = crc32_bt(r, 74);
+        memcpy(r + 74, &c, 4);
+        n = 78;
+    }
+    if (sony_write(r, n)) {
+        trig_set = on;
+        rt_log("pad: DualSense adaptive triggers %s", on ? "on (R2 resistance)" : "off");
+    }
+}
+void nx2_pad_shutdown(void) {   // the window closes: the controller's triggers back to normal
+    if (sony_connected && trig_set) sony_trigger_write(0);
 }
 
 static void sony_rumble_write(uint8_t strong, uint8_t weak) {
@@ -365,13 +430,7 @@ static void sony_rumble_write(uint8_t strong, uint8_t weak) {
         r[0] = 0x02, r[1] = 0x03, r[3] = weak, r[4] = strong;   // flags: compatible vibration + haptics select
         n = 48;
     }
-    if (sony_out == INVALID_HANDLE_VALUE)
-        sony_out = CreateFileW(sony_path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    DWORD done;
-    if (sony_out != INVALID_HANDLE_VALUE && !WriteFile(sony_out, r, n, &done, NULL)) {
-        CloseHandle(sony_out);   // unplugged: opened again with the next controller
-        sony_out = INVALID_HANDLE_VALUE;
-    }
+    sony_write(r, n);
 }
 
 // ---- interface for nx2_hid.c

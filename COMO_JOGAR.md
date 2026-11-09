@@ -24,23 +24,33 @@ em `setup_work\setup.log`).
 |---|---|
 | Resolução da janela | Tamanho da janela (1280x720 até 3840x2160). O tamanho do seu monitor abre em tela cheia; maior que a tela, a janela se ajusta. A imagem mantém 16:9 (faixas pretas se a janela tiver outro formato) |
 | Modo de exibição | Janela ou tela cheia sem bordas |
+| HDR | Imagem HDR10 do próprio jogo. Precisa de monitor HDR e do HDR ligado no Windows (Configurações > Tela > Usar HDR) |
 | Modo do console | **TV**: o jogo gera imagem 4K (mais bonito). **Portátil**: 1280x720 (mais leve) |
 | Escala da imagem | **AMD FSR 1**, **NVIDIA Image Scaling (NIS)** (mais nítidos) ou linear (mais suave) |
 | Nitidez | Quanto o FSR / NIS realçam os contornos: nenhuma, média, alta (recomendado) ou máxima |
-| Limite de FPS | 30, 60 (recomendado), 120 (experimental) ou sem limite |
+| Limite de FPS | 60 (recomendado) ou 30. O jogo conta o tempo em quadros de 1/60 s: acima de 60 ele ficaria acelerado |
 | VSync | Desligado tem menos atraso; ligado evita "tearing" |
 | Overlay de desempenho | Desligado, só FPS, ou completo (FPS, tempos, CPU, GPU, memória) |
 | Controle | Automático (Xbox, PlayStation, teclado) ou só teclado |
 | Botões | Posição do Switch (A à direita) ou Xbox/PlayStation (A embaixo) |
 | Vibração | Desligada, fraca ou forte |
+| Gatilhos adaptativos | DualSense: resistência leve no R2 (atirar). O L2 continua livre |
 | Mira por movimento | Como no Switch: mova o DualSense / DualShock 4 para mirar (giroscópio). Pode desligar |
 | Mira vertical (analógico R) | O jogo mira para cima e para baixo com o movimento do controle; aqui o analógico direito faz esse papel. Baixa, média ou alta; desligue se tirar os controles de movimento nas opções do jogo |
 | Pasta do jogo | A pasta do jogo com as subpastas `exefs` e `romfs` (atualização 65536). Clique para escolher |
+| Procurar atualizações | O launcher pergunta ao GitHub se saiu versão nova e avisa na tela inicial (nada é baixado sozinho) |
 | Idioma | Português ou inglês (automático segue o idioma do Windows); vale para o menu e o overlay |
 | Mostrar este menu ao iniciar | "Não" abre o jogo direto. Segure **Shift** ao abrir para ver o menu de novo |
 
 As escolhas ficam em `splatoon.ini`, ao lado do programa (dá para editar à mão). Os saves ficam na pasta
 `profile`, também ao lado do programa.
+
+**Importar um save:** em **Jogar > Instalação**, o botão **Importar save** procura sozinho o save do jogo no Eden,
+yuzu e derivados. Também dá para escolher uma pasta com `save.dat` (por exemplo, um save tirado do console). O save
+anterior fica guardado em `profile/save-backup`.
+
+**Se o jogo fechar por um erro**, o launcher mostra a mensagem do erro e o caminho do `logs/splatoon.log`, que é o
+arquivo para anexar ao relatar o problema.
 
 ## Desempenho e resolução
 

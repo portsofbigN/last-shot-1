@@ -69,6 +69,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         rt_log("window closed: exiting");
         void nx2_pcache_save(int);
         nx2_pcache_save(1);
+        void nx2_pad_shutdown(void);
+        nx2_pad_shutdown();
         ExitProcess(0);
     }
     if ((m == WM_KEYDOWN || m == WM_SYSKEYDOWN) && !(l & (1 << 30))) {   // first press, not auto-repeat
@@ -165,6 +167,7 @@ uint32_t nx2_vk_memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
     rt_fatal("vulkan: no memory type %#x for %#x", (unsigned)want, (unsigned)bits);
 }
 
+static int swap_hdr;   // the swapchain is HDR10 (A2B10G10R10, PQ)
 static void create_swapchain(void) {
     VkSurfaceCapabilitiesKHR caps;
     VKCHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys, surface, &caps));
@@ -178,6 +181,20 @@ static void create_swapchain(void) {
     ci.minImageCount = count;
     ci.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
     ci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    {   // HDR (nx2_hdr.c): the game's PQ frame shown as it is, on an HDR10 swapchain
+        int nx2_hdr_wanted(void);
+        static VkSurfaceFormatKHR sf[64];
+        uint32_t nf = 64;
+        swap_hdr = 0;
+        if (nx2_hdr_wanted() && vkGetPhysicalDeviceSurfaceFormatsKHR(phys, surface, &nf, sf) >= 0)
+            for (uint32_t i = 0; i < nf && !swap_hdr; i++)
+                if (sf[i].colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+                    (sf[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || sf[i].format == VK_FORMAT_A2R10G10B10_UNORM_PACK32))
+                    ci.imageFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32, ci.imageColorSpace = sf[i].colorSpace, swap_hdr = 1;
+        static int hl;
+        if (nx2_hdr_wanted() && !hl++)
+            rt_log("vk: %s", swap_hdr ? "HDR10 swapchain" : "no HDR10 swapchain format on this display: the picture will look washed out");
+    }
     ci.imageExtent = swap_extent;
     ci.imageArrayLayers = 1;
     ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -186,8 +203,12 @@ static void create_swapchain(void) {
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     // Frames are paced to 60 fps by pace_frame; FIFO on a 144 / 165 Hz monitor also waits for the next vblank,
     // which turned 16.7 ms frames into 18. MAILBOX (no tearing, no wait) when the surface has it; NX2_VSYNC=1: FIFO.
+    // NX2_VSYNC=vrr (G-SYNC / FreeSync): FIFO too - with variable refresh the monitor waits for each frame instead,
+    // so the paced 60 fps are shown as they come (mailbox would keep the monitor at its fixed maximum rate).
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
-    if (!getenv("NX2_VSYNC")) {
+    const char *vs = getenv("NX2_VSYNC");
+    int vrr = vs && !strcmp(vs, "vrr");
+    if (!vs || !strcmp(vs, "0")) {
         VkPresentModeKHR modes[16];
         uint32_t nm = 16;
         if (vkGetPhysicalDeviceSurfacePresentModesKHR(phys, surface, &nm, modes) >= 0)
@@ -195,7 +216,8 @@ static void create_swapchain(void) {
                 if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) ci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
     }
     static int logged;
-    if (!logged++) rt_log("vk: present mode %s", ci.presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo");
+    if (!logged++)
+        rt_log("vk: present mode %s", ci.presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : vrr ? "fifo (G-SYNC / FreeSync)" : "fifo");
     ci.clipped = VK_TRUE;
     ci.oldSwapchain = swapchain;
     VkSwapchainKHR next;
@@ -267,10 +289,20 @@ static VkPhysicalDeviceVulkan13Features feat13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEV
 static void init(void) {
     CreateThread(NULL, 0, window_thread, NULL, 0, NULL);
     while (!InterlockedCompareExchange(&window_ready, 1, 1)) Sleep(1);
-    const char *iext[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    const char *iext[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+                          VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME};
+    uint32_t niext = 2;
+    {   // the HDR10 colour space of the swapchain (nx2_hdr.c) needs VK_EXT_swapchain_colorspace
+        int nx2_hdr_wanted(void);
+        static VkExtensionProperties ie[256];
+        uint32_t ne = 256;
+        if (nx2_hdr_wanted() && vkEnumerateInstanceExtensionProperties(NULL, &ne, ie) >= 0)
+            for (uint32_t i = 0; i < ne; i++)
+                if (!strcmp(ie[i].extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) niext = 3;
+    }
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "Splatoon Raiders recomp", 1, "nx2", 1,
                              VK_API_VERSION_1_3};
-    VkInstanceCreateInfo ic = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &app, 0, NULL, 2, iext};
+    VkInstanceCreateInfo ic = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &app, 0, NULL, niext, iext};
     VKCHECK(vkCreateInstance(&ic, NULL, &inst));
     VkWin32SurfaceCreateInfoKHR sc = {VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR, NULL, 0,
                                       GetModuleHandleW(NULL), hwnd};
@@ -338,6 +370,30 @@ static void init(void) {
     ctx = (Nx2VkCtx){inst, phys, dev, queue, qfamily};
     static char gpu[256];
     snprintf(gpu, sizeof gpu, "%s", props.deviceName);
+    {   // the hardware, for bug reports from other machines
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+        uint64_t vram = 0;
+        for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+            if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram += mp.memoryHeaps[i].size;
+        uint32_t dv = props.driverVersion;
+        char drv[32];
+        if (props.vendorID == 0x10de) snprintf(drv, sizeof drv, "%u.%u", dv >> 22, (dv >> 14) & 0xff);   // NVIDIA
+        else snprintf(drv, sizeof drv, "%u.%u.%u", VK_VERSION_MAJOR(dv), VK_VERSION_MINOR(dv), VK_VERSION_PATCH(dv));
+        char cpu[64] = "?";
+        HKEY k;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &k) == 0) {
+            DWORD n = sizeof cpu - 1;
+            RegQueryValueExA(k, "ProcessorNameString", NULL, NULL, (BYTE *)cpu, &n);
+            RegCloseKey(k);
+        }
+        MEMORYSTATUSEX ms = {sizeof ms};
+        GlobalMemoryStatusEx(&ms);
+        rt_log("hardware: GPU %s (vendor %#x, driver %s, Vulkan %u.%u, %.1f GiB video memory); CPU %s, %u threads; "
+               "%.1f GiB RAM", props.deviceName, props.vendorID, drv, VK_VERSION_MAJOR(props.apiVersion),
+               VK_VERSION_MINOR(props.apiVersion), vram / 1073741824.0, cpu, plat_cpu_count(),
+               ms.ullTotalPhys / 1073741824.0);
+    }
     void nx2_overlay_info(const char *gpu, uint64_t (*vram)(uint64_t *budget));
     nx2_overlay_info(gpu, vram_used);
     ready = 1;
@@ -435,6 +491,13 @@ static void pace_frame(void) {
     if (period == 1) {
         const char *e = getenv("NX2_FPS");
         int fps = e ? atoi(e) : 60;
+        // The game advances whole 1/60 s steps per frame (it catches up below 60, measured at 30): faster than 60 it
+        // runs too fast (camera and walking twice as far at 120). Old settings with 120 / no limit go back to 60;
+        // NX2_FPS_UNLOCK=1 (tests) keeps them.
+        if ((fps <= 0 || fps > 60) && !getenv("NX2_FPS_UNLOCK")) {
+            if (e) rt_log("pace: NX2_FPS=%s would speed the game up; 60", e);
+            fps = 60;
+        }
         period = fps > 0 ? 1000000000ull / (uint64_t)fps : 0;
     }
     if (!period) return;
@@ -462,7 +525,10 @@ void nx2_present_rgba(const uint8_t *rgba, uint32_t w, uint32_t h, uint64_t fram
     if (shot) {
         const char *fs = getenv("NX2_SHOT_FRAME");
         uint64_t want = fs ? strtoull(fs, NULL, 10) : 300;
-        if (frame == want) {
+        extern uint64_t nx2_script_clock(void);
+        static int done;
+        if (getenv("NX2_SCRIPT_TIME") ? !done && nx2_script_clock() >= want : frame == want) {
+            done = 1;
             nx2_write_png(shot, rgba, w, h, w >= 2560 ? 3 : 1);
             rt_log("screenshot of present #%llu written to %s", (unsigned long long)frame, shot);
             ExitProcess(0);
@@ -563,6 +629,11 @@ static void shot_from_image(VkImage img, VkImageLayout *layout, uint32_t w, uint
     VKCHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX));
     void *p;
     VKCHECK(vkMapMemory(dev, mem, 0, VK_WHOLE_SIZE, 0, &p));
+    {   // in HDR the game's frame is PQ RGB10A2: to sRGB for the PNG
+        int nx2_hdr_wanted(void);
+        void nx2_hdr_to_srgb8(uint8_t *, size_t);
+        if (nx2_hdr_wanted()) nx2_hdr_to_srgb8(p, (size_t)w * h);
+    }
     nx2_write_png(shot, p, w, h, getenv("NX2_SHOT_STEP") ? (uint32_t)atoi(getenv("NX2_SHOT_STEP")) : w >= 2560 ? 3 : 1);
     rt_log("screenshot of present #%llu (GPU image) written to %s", (unsigned long long)frame, shot);
     if (exit_after) ExitProcess(0);
@@ -675,6 +746,10 @@ void nx2_present_image(VkImage img, VkImageLayout *layout, uint32_t w, uint32_t 
                 VKCHECK(vkMapMemory(dev, ov_mem, 0, VK_WHOLE_SIZE, 0, &ov_ptr));
             }
             for (uint32_t yy = 0; yy < oh; yy++) memcpy((uint32_t *)ov_ptr + (size_t)yy * ow, px + (size_t)yy * os, ow * 4);
+            if (swap_hdr) {   // the overlay is SDR: to PQ, at the brightness of SDR white
+                void nx2_hdr_overlay(uint32_t *, size_t);
+                nx2_hdr_overlay((uint32_t *)ov_ptr, (size_t)ow * oh);
+            }
             uint32_t margin = swap_extent.height / 90 + 4;
             VkBufferImageCopy oc = {0, ow, oh, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {(int)margin, (int)margin, 0},
                                     {ow, oh, 1}};

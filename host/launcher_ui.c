@@ -13,10 +13,16 @@
 #include <bcrypt.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <tlhelp32.h>
+#include <winhttp.h>
+#define COBJMACROS
+#include <dxgi.h>
 
 #include "nx2_cfg.h"
 
 #define APP_VERSION "1.0.0"
+#define APP_VERSION_W L"1.0.0"
+static char upd_tag[64], upd_url[300];   // a newer release found by update_thread
 #define SUPPORTED_VERSION "65536"
 #define SUPPORTED_TITLE "0400380020056000"
 #define SUPPORTED_SHA256 "35fe1cbe7ea983e1e6ce8716b98e884a2f6cfb02c9514d51ec2c00daa4addcde"
@@ -95,7 +101,7 @@ int __stdcall GdipAddPathEllipse(void *path, float x, float y, float w, float h)
 
 enum { P_PLAY, P_SETTINGS, P_FILES, P_ABOUT, NPAGE };
 enum {   // clickable areas
-    Z_NAV = 1, Z_PLAY = 10, Z_CHOOSE, Z_OPEN_DIR, Z_CHANGE, Z_BROWSE, Z_USE, Z_BACK, Z_SAVE, Z_REVERT, Z_PREP, Z_SETUP
+    Z_NAV = 1, Z_PLAY = 10, Z_CHOOSE, Z_OPEN_DIR, Z_CHANGE, Z_BROWSE, Z_USE, Z_BACK, Z_SAVE, Z_REVERT, Z_PREP, Z_SETUP, Z_IMPORT, Z_UPDATE
 };
 enum { CK_NONE, CK_BUSY, CK_OK, CK_MISSING, CK_VERSION, CK_UNSET };
 #define WM_APP_CHECKED (WM_APP + 1)
@@ -129,6 +135,9 @@ static void start_shader_prep(int then_play);
 // the Set up: SplatoonRaiders.exe built here from the player's game files (setup\tools\setup_build.py with the bundled
 // Python and Zig), as the Pokopia launcher does; the runtime (SplatoonRaiders_rt.dll) comes built
 static int setup_ok;   // the Set up's tools are in the folder
+static volatile LONG su_kb_done, su_kb_total;   // source compiled (KiB), for the time left
+static ULONGLONG su_t0;   // when the compile progress started (ms)
+static LONG su_kb0;
 static volatile LONG su_state, su_done, su_total;   // 0 idle, 1 lifting the code, 2 glue, 3 compiling, 4 linking
 static char su_error[300];
 static HANDLE su_job;
@@ -423,6 +432,65 @@ static void reset_combos(void) {   // back to the saved values
     }
 }
 static int combo_value(int i) { return combos[i] ? (int)SendMessageW(combos[i], CB_GETCURSEL, 0, 0) : -1; }
+// ---- quality presets: the settings each one sets (the "preset" combo; any of these changed by hand: Custom)
+typedef struct { const char *key, *v[3]; } PresetRow;   // values for low, balanced, high
+static const PresetRow presets[] = {
+    {"mode", {"handheld", "docked", "docked"}},
+    {"upscaler", {"fsr", "fsr", "nis"}},
+    {"antialias", {"fxaa", "fxaa", "smaa"}},
+    {"anisotropic", {"0", "0", "4"}},
+};
+static int setting_index(const char *key) {
+    for (int i = 0; i < nx2_cfg_count(); i++)
+        if (!strcmp(nx2_cfg_at(i)->key, key)) return i;
+    return -1;
+}
+static int value_index(int i, const char *v) {
+    Setting *s = nx2_cfg_at(i);
+    for (int k = 0; k < s->nvalues; k++)
+        if (!strcmp(s->values[k], v)) return k;
+    return -1;
+}
+static void apply_preset_combos(int p) {   // p: 1 low, 2 balanced, 3 high
+    for (size_t r = 0; r < sizeof presets / sizeof *presets; r++) {
+        int i = setting_index(presets[r].key), k = i >= 0 ? value_index(i, presets[r].v[p - 1]) : -1;
+        if (k >= 0 && combos[i]) SendMessageW(combos[i], CB_SETCURSEL, (WPARAM)k, 0);
+    }
+}
+static int is_preset_key(const char *key) {
+    for (size_t r = 0; r < sizeof presets / sizeof *presets; r++)
+        if (!strcmp(presets[r].key, key)) return 1;
+    return 0;
+}
+// First start (no splatoon.ini yet): a preset for the graphics card - Low for integrated graphics or under 3 GB of
+// video memory, Balanced otherwise. The card is read through DXGI (the one with the most dedicated memory).
+static void first_run_preset(void) {
+    IDXGIFactory1 *f = NULL;
+    size_t vram = 0;
+    UINT vendor = 0;
+    wchar_t name[128] = L"?";
+    if (SUCCEEDED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&f))) {
+        IDXGIAdapter1 *a;
+        for (UINT n = 0; f->lpVtbl->EnumAdapters1(f, n, &a) != DXGI_ERROR_NOT_FOUND; n++) {
+            DXGI_ADAPTER_DESC1 d;
+            if (SUCCEEDED(a->lpVtbl->GetDesc1(a, &d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+                d.DedicatedVideoMemory > vram)
+                vram = d.DedicatedVideoMemory, vendor = d.VendorId, wcsncpy(name, d.Description, 127);
+            a->lpVtbl->Release(a);
+        }
+        f->lpVtbl->Release(f);
+    }
+    int p = vram && vram < (3ull << 30) ? 1 : 2;
+    for (size_t r = 0; r < sizeof presets / sizeof *presets; r++) {
+        Setting *s = nx2_cfg_find(presets[r].key);
+        if (s) snprintf(s->value, sizeof s->value, "%s", presets[r].v[p - 1]);
+    }
+    Setting *ps = nx2_cfg_find("preset");
+    if (ps) snprintf(ps->value, sizeof ps->value, "%s", p == 1 ? "low" : "balanced");
+    nx2_cfg_save();
+    (void)vendor, (void)name;
+}
+
 static void update_dirty(void) {
     int d = 0;
     for (int i = 0; i < nx2_cfg_count(); i++) {
@@ -518,6 +586,13 @@ static int paint_play(HDC dc, int x, int y0, int w) {
         snprintf(msg, sizeof msg, T("A preparação dos shaders falhou: %s", "The shader preparation failed: %s"), sp_error);
         y += banner(dc, x, y, w, B_WARN, msg, 1) + S(16);
     }
+    if (upd_tag[0]) {   // a newer release on GitHub (update_thread)
+        snprintf(msg, sizeof msg, T("Nova versão disponível: %s (esta é a " APP_VERSION ").",
+                                    "A new version is out: %s (this one is " APP_VERSION ")."), upd_tag);
+        y += banner(dc, x, y, w, B_INFO, msg, 1) + S(8);
+        button(dc, zp, &nzp, hot_page, x, y, Z_UPDATE, I_FOLDER_OPEN, T("Abrir página de download", "Open the download page"), 0, 1, 0);
+        y += S(40) + S(16);
+    }
     if (status_msg[0]) {
         char m[600];
         WideCharToMultiByte(CP_UTF8, 0, status_msg, -1, m, sizeof m, NULL, NULL);
@@ -533,8 +608,17 @@ static int paint_play(HDC dc, int x, int y0, int w) {
         char st[200];
         if (su_state == 1) snprintf(st, sizeof st, "%s", T("Convertendo o código do jogo...", "Converting the game's code..."));
         else if (su_state == 2) snprintf(st, sizeof st, "%s", T("Preparando a compilação...", "Preparing the build..."));
-        else if (su_state == 3)
-            snprintf(st, sizeof st, T("Compilando %ld/%ld", "Compiling %ld/%ld"), su_done, su_total);
+        else if (su_state == 3) {
+            int n = snprintf(st, sizeof st, T("Compilando %ld/%ld", "Compiling %ld/%ld"), su_done, su_total);
+            // the time left, from the rate so far (in source bytes: the files differ a lot in size)
+            ULONGLONG el = su_t0 ? GetTickCount64() - su_t0 : 0;
+            LONG d = su_kb_done - su_kb0, left = su_kb_total - su_kb_done;
+            if (el > 20000 && d > 0 && (LONGLONG)d * 50 > su_kb_total - su_kb0 && left > 0) {
+                ULONGLONG min = (ULONGLONG)((double)el * left / d / 60000.0 + 0.5);
+                if (min < 1) snprintf(st + n, sizeof st - n, "%s", T(" · menos de 1 min", " · under 1 min"));
+                else snprintf(st + n, sizeof st - n, T(" · cerca de %llu min", " · about %llu min left"), min);
+            }
+        }
         else if (su_state == 4) snprintf(st, sizeof st, "%s", T("Montando o SplatoonRaiders.exe...", "Linking SplatoonRaiders.exe..."));
         else if (sp_state == 1)
             snprintf(st, sizeof st, T("Lendo os arquivos do jogo %ld/%ld", "Reading the game files %ld/%ld"), sp_done, sp_total);
@@ -579,7 +663,7 @@ static int paint_play(HDC dc, int x, int y0, int w) {
     ch += setup_row(dc, cx, 0, cw, T("Arquivos", "Game files"), files_v, files_p[0] ? files_p : NULL, 0);
     ch += setup_row(dc, cx, 0, cw, "Shaders", shader_v, NULL, 0);
     ch += setup_row(dc, cx, 0, cw, T("Programa", "Program"), dir_v, dir_p, 0);
-    ch += S(12) + S(40) + S(24);
+    ch += S(12) + S(40) + S(24) + S(40) + S(12);
     card_bg(dc, x, y, w, ch);
     int yy = y + S(22);
     yy += card_title(dc, cx, yy, I_TOOL, T("Instalação", "Setup"));
@@ -591,6 +675,8 @@ static int paint_play(HDC dc, int x, int y0, int w) {
     int b2 = button(dc, zp, &nzp, hot_page, cx + b1 + S(12), yy, Z_PREP, I_TOOL, T("Preparar shaders", "Prepare shaders"), 0,
                     ck_cur.state == CK_OK && exe_ok && !sp_state && !prep_state, 0);
     link_button(dc, zp, &nzp, hot_page, cx + b1 + S(12) + b2 + S(14), yy, Z_CHANGE, T("Trocar arquivos do jogo", "Change game files"));
+    yy += S(40) + S(12);
+    button(dc, zp, &nzp, hot_page, cx, yy, Z_IMPORT, I_SAVE, T("Importar save (Eden, yuzu ou console)", "Import save (Eden, yuzu or console)"), 0, 1, 0);
     return y + ch + S(32) - y0;
 }
 
@@ -901,6 +987,245 @@ static void paint_main(HWND h) {
     EndPaint(h, &ps);
 }
 
+// ---- update check: the latest release of UPDATE_REPO on GitHub, asked once at start in the background (setting
+// "updates"). A newer tag than APP_VERSION shows a banner on the Play page with a button to its download page.
+#ifndef UPDATE_REPO
+#define UPDATE_REPO ""   // "owner/name" of the GitHub repository; empty: no check
+#endif
+#define WM_APP_UPDATE (WM_APP + 9)
+static int ver_newer(const char *tag, const char *cur) {   // "v1.2.3" against "1.2.0"
+    int a[3] = {0}, b[3] = {0};
+    while (*tag && (*tag < '0' || *tag > '9')) tag++;
+    sscanf(tag, "%d.%d.%d", &a[0], &a[1], &a[2]);
+    sscanf(cur, "%d.%d.%d", &b[0], &b[1], &b[2]);
+    for (int i = 0; i < 3; i++)
+        if (a[i] != b[i]) return a[i] > b[i];
+    return 0;
+}
+static int json_str(const char *j, const char *key, char *out, size_t n) {   // "key": "value" (no escapes needed here)
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(j, pat);
+    if (!p) return 0;
+    p = strchr(p + strlen(pat), '"');
+    if (!p) return 0;
+    const char *e = strchr(++p, '"');
+    if (!e || (size_t)(e - p) >= n) return 0;
+    memcpy(out, p, (size_t)(e - p));
+    out[e - p] = 0;
+    return 1;
+}
+static DWORD WINAPI update_thread(void *arg) {
+    (void)arg;
+    wchar_t path[200];
+    swprintf(path, 200, L"/repos/%hs/releases/latest", UPDATE_REPO);
+    HINTERNET s = WinHttpOpen(L"SplatoonRaidersRecomp-Launcher/" APP_VERSION_W, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET c = s ? WinHttpConnect(s, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0) : NULL;
+    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                         WINHTTP_FLAG_SECURE) : NULL;
+    static char body[1 << 16];
+    DWORD len = 0;
+    if (r) WinHttpSetTimeouts(r, 5000, 5000, 5000, 5000);
+    if (r && WinHttpSendRequest(r, L"Accept: application/vnd.github+json\r\n", (DWORD)-1, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(r, NULL)) {
+        DWORD got;
+        while (len < sizeof body - 1 && WinHttpReadData(r, body + len, sizeof body - 1 - len, &got) && got) len += got;
+    }
+    body[len] = 0;
+    if (r) WinHttpCloseHandle(r);
+    if (c) WinHttpCloseHandle(c);
+    if (s) WinHttpCloseHandle(s);
+    char tag[64], url[300];
+    if (json_str(body, "tag_name", tag, sizeof tag) && json_str(body, "html_url", url, sizeof url) &&
+        !strncmp(url, "https://github.com/", 19) && ver_newer(tag, APP_VERSION)) {
+        snprintf(upd_tag, sizeof upd_tag, "%s", tag);
+        snprintf(upd_url, sizeof upd_url, "%s", url);
+        PostMessageW(w_main, WM_APP_UPDATE, 0, 0);
+    }
+    return 0;
+}
+static void start_update_check(void) {
+    Setting *u = nx2_cfg_find("updates");
+    if (!UPDATE_REPO[0] || (u && !strcmp(u->value, "0"))) return;
+    CloseHandle(CreateThread(NULL, 0, update_thread, NULL, 0, NULL));
+}
+static void open_update(void) {
+    wchar_t w[300];
+    MultiByteToWideChar(CP_UTF8, 0, upd_url, -1, w, 300);
+    ShellExecuteW(w_main, L"open", w, NULL, NULL, SW_SHOWNORMAL);
+}
+
+// ---- save import: a save from an emulator (Eden, yuzu and its forks) or a console dump (a folder with save.dat)
+// becomes the port's save (profile/save/<account>). The save there before is moved to profile/save-backup.
+#define SAVE_TITLE L"0400380020056000"
+static int game_running(void) {
+    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (s == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W e = {sizeof e};
+    int found = 0;
+    for (BOOL ok = Process32FirstW(s, &e); ok && !found; ok = Process32NextW(s, &e))
+        found = !_wcsicmp(e.szExeFile, L"SplatoonRaiders.exe");
+    CloseHandle(s);
+    return found;
+}
+static int has_files(const wchar_t *dir, FILETIME *newest) {   // files directly in dir; newest write time
+    wchar_t pat[MAX_PATH];
+    swprintf(pat, MAX_PATH, L"%ls\\*", dir);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int n = 0;
+    do
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            n++;
+            if (newest && CompareFileTime(&fd.ftLastWriteTime, newest) > 0) *newest = fd.ftLastWriteTime;
+        }
+    while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+// The newest emulator save of the game: <APPDATA>/<emulator>/nand/user/save/0000000000000000/<user>/<title>
+static int find_emulator_save(wchar_t *out, wchar_t *emu) {
+    static const wchar_t *emus[] = {L"eden", L"yuzu", L"suyu", L"citron", L"sudachi", L"torzu"};
+    wchar_t app[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"APPDATA", app, MAX_PATH)) return 0;
+    FILETIME best = {0};
+    int found = 0;
+    for (size_t i = 0; i < sizeof emus / sizeof *emus; i++) {
+        wchar_t base[MAX_PATH], pat[MAX_PATH];
+        swprintf(base, MAX_PATH, L"%ls\\%ls\\nand\\user\\save\\0000000000000000", app, emus[i]);
+        swprintf(pat, MAX_PATH, L"%ls\\*", base);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(pat, &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+            wchar_t d[MAX_PATH];
+            swprintf(d, MAX_PATH, L"%ls\\%ls\\" SAVE_TITLE, base, fd.cFileName);
+            FILETIME t = {0};
+            if (has_files(d, &t) && (!found || CompareFileTime(&t, &best) > 0)) {
+                found = 1, best = t;
+                wcscpy(out, d);
+                wcscpy(emu, emus[i]);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return found;
+}
+static int copy_tree(const wchar_t *from, const wchar_t *to) {
+    CreateDirectoryW(to, NULL);
+    wchar_t pat[MAX_PATH];
+    swprintf(pat, MAX_PATH, L"%ls\\*", from);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int ok = 1;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        wchar_t a[MAX_PATH], b[MAX_PATH];
+        swprintf(a, MAX_PATH, L"%ls\\%ls", from, fd.cFileName);
+        swprintf(b, MAX_PATH, L"%ls\\%ls", to, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok &= copy_tree(a, b);
+        else ok &= CopyFileW(a, b, FALSE) != 0;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+// profile/save/<account>, the folder the game reads (account.uid made as the game would when it is missing)
+static int save_target(wchar_t *out) {
+    wchar_t prof[MAX_PATH], uidp[MAX_PATH];
+    swprintf(prof, MAX_PATH, L"%lsprofile", exe_dir);
+    CreateDirectoryW(prof, NULL);
+    swprintf(uidp, MAX_PATH, L"%ls\\account.uid", prof);
+    uint64_t uid[2] = {0, 0};   // lo, hi
+    FILE *f = _wfopen(uidp, L"rb");
+    if (f) {
+        size_t got = fread(uid, 1, sizeof uid, f);
+        fclose(f);
+        if (got != sizeof uid) return 0;
+    } else {
+        if (BCryptGenRandom(NULL, (PUCHAR)uid, sizeof uid, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0 || !(uid[0] | uid[1])) return 0;
+        f = _wfopen(uidp, L"wb");
+        if (!f) return 0;
+        fwrite(uid, 1, sizeof uid, f);
+        fclose(f);
+    }
+    swprintf(out, MAX_PATH, L"%ls\\save", prof);
+    CreateDirectoryW(out, NULL);
+    swprintf(out, MAX_PATH, L"%ls\\save\\%016llx%016llx", prof, (unsigned long long)uid[1], (unsigned long long)uid[0]);
+    return 1;
+}
+static void import_save(void) {
+    if (game_running()) {
+        MessageBoxW(w_main, lang ? L"Close the game before importing a save." : L"Feche o jogo antes de importar um save.",
+                    L"Splatoon Raiders Recomp", MB_ICONWARNING);
+        return;
+    }
+    wchar_t src[MAX_PATH] = L"", emu[32] = L"", msg[1024];
+    if (find_emulator_save(src, emu)) {
+        swprintf(msg, 1024,
+                 lang ? L"Found a %ls save of the game:\n%ls\n\nImport it? Your current save is kept in profile\\save-backup.\n\n"
+                        L"No: choose another folder."
+                      : L"Encontrei um save do jogo no %ls:\n%ls\n\nImportar? O save atual fica guardado em profile\\save-backup.\n\n"
+                        L"Não: escolher outra pasta.",
+                 emu, src);
+        int r = MessageBoxW(w_main, msg, L"Splatoon Raiders Recomp", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (r == IDCANCEL) return;
+        if (r == IDNO) src[0] = 0;
+    }
+    if (!src[0]) {
+        BROWSEINFOW bi = {0};
+        bi.hwndOwner = w_main;
+        bi.lpszTitle = lang ? L"Choose the save folder (the one with save.dat)" : L"Escolha a pasta do save (a que tem o save.dat)";
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+        PIDLIST_ABSOLUTE id = SHBrowseForFolderW(&bi);
+        if (!id) return;
+        int got = SHGetPathFromIDListW(id, src);
+        CoTaskMemFree((void *)id);
+        if (!got) return;
+    }
+    wchar_t chk[MAX_PATH];
+    swprintf(chk, MAX_PATH, L"%ls\\save.dat", src);
+    if (GetFileAttributesW(chk) == INVALID_FILE_ATTRIBUTES) {
+        swprintf(msg, 1024, lang ? L"%ls has no save.dat: it is not a Splatoon Raiders save." :
+                                   L"%ls não tem save.dat: não é um save de Splatoon Raiders.", src);
+        MessageBoxW(w_main, msg, L"Splatoon Raiders Recomp", MB_ICONWARNING);
+        return;
+    }
+    wchar_t dst[MAX_PATH];
+    if (!save_target(dst)) {
+        MessageBoxW(w_main, lang ? L"Could not read profile\\account.uid." : L"Não foi possível ler profile\\account.uid.",
+                    L"Splatoon Raiders Recomp", MB_ICONERROR);
+        return;
+    }
+    if (GetFileAttributesW(dst) != INVALID_FILE_ATTRIBUTES) {   // the current save to profile/save-backup/<time>-import
+        wchar_t bk[MAX_PATH];
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        swprintf(bk, MAX_PATH, L"%lsprofile\\save-backup", exe_dir);
+        CreateDirectoryW(bk, NULL);
+        swprintf(bk, MAX_PATH, L"%lsprofile\\save-backup\\%04u%02u%02u-%02u%02u%02u-import", exe_dir, t.wYear, t.wMonth, t.wDay,
+                 t.wHour, t.wMinute, t.wSecond);
+        if (!MoveFileW(dst, bk)) {
+            swprintf(msg, 1024, lang ? L"Could not move the current save aside (error %lu): nothing changed." :
+                                       L"Não foi possível guardar o save atual (erro %lu): nada foi alterado.", GetLastError());
+            MessageBoxW(w_main, msg, L"Splatoon Raiders Recomp", MB_ICONERROR);
+            return;
+        }
+    }
+    if (!copy_tree(src, dst)) {
+        MessageBoxW(w_main, lang ? L"Some files could not be copied. The previous save is in profile\\save-backup." :
+                                   L"Alguns arquivos não foram copiados. O save anterior está em profile\\save-backup.",
+                    L"Splatoon Raiders Recomp", MB_ICONERROR);
+        return;
+    }
+    MessageBoxW(w_main, lang ? L"Save imported. The previous one is in profile\\save-backup." :
+                               L"Save importado. O anterior está em profile\\save-backup.",
+                L"Splatoon Raiders Recomp", MB_ICONINFORMATION);
+}
+
 // ---- actions
 static void set_page(int p) {
     if (p == page) return;
@@ -1031,6 +1356,10 @@ static DWORD WINAPI su_reader(LPVOID a) {
             else if (!strcmp(line, "step compile")) InterlockedExchange(&su_state, 3);
             else if (!strcmp(line, "step link")) InterlockedExchange(&su_state, 4);
             else if (sscanf(line, "build %ld %ld", &x, &y) == 2) InterlockedExchange(&su_done, x), InterlockedExchange(&su_total, y);
+            else if (sscanf(line, "bytes %ld %ld", &x, &y) == 2) {
+                if (!su_t0) su_t0 = GetTickCount64(), su_kb0 = x;
+                InterlockedExchange(&su_kb_done, x), InterlockedExchange(&su_kb_total, y);
+            }
             else if (!strcmp(line, "done")) ok = 1;
             else if (!strncmp(line, "error ", 6)) snprintf(su_error, sizeof su_error, "%s", line + 6);
         }
@@ -1086,6 +1415,7 @@ static void start_setup(void) {
     CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
     su_error[0] = 0, status_msg[0] = 0, sp_error[0] = 0;
     InterlockedExchange(&su_done, 0), InterlockedExchange(&su_total, 0), InterlockedExchange(&su_state, 1);
+    su_t0 = 0, su_kb0 = 0, su_kb_done = su_kb_total = 0;
     SetTimer(w_main, 3, 250, NULL);
     CloseHandle(CreateThread(NULL, 0, su_reader, rd, 0, NULL));
     InvalidateRect(w_page, NULL, FALSE);
@@ -1102,6 +1432,49 @@ static DWORD WINAPI prep_thread(LPVOID a) {
     PostMessageW(w_main, WM_APP_PREPPED, 0, 0);
     return 0;
 }
+// After Play the launcher stays, without a window, until the game ends. When the game stops on an error (a non-zero
+// exit code: closing the window exits with 0) it says so, with the error line from logs/splatoon.log, instead of the
+// game window just disappearing.
+static HANDLE game_proc;
+static void watch_game(void) {
+    if (!game_proc) return;
+    WaitForSingleObject(game_proc, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(game_proc, &code);
+    CloseHandle(game_proc);
+    if (!code) return;
+    wchar_t logp[MAX_PATH + 32], logs[MAX_PATH + 16];
+    swprintf(logs, MAX_PATH + 16, L"%lslogs", exe_dir);
+    swprintf(logp, MAX_PATH + 32, L"%ls\\splatoon.log", logs);
+    char last[400] = "";
+    FILE *f = _wfopen(logp, L"rb");
+    if (f) {   // the last FATAL / crash line of the log's end
+        static char buf[65536];
+        fseek(f, 0, SEEK_END);
+        long n = ftell(f), from = n > (long)sizeof buf - 1 ? n - (long)sizeof buf + 1 : 0;
+        fseek(f, from, SEEK_SET);
+        size_t got = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        buf[got] = 0;
+        for (char *l = buf; l && *l;) {
+            char *e = strchr(l, 10);
+            if (e) *e = 0;
+            if (strstr(l, "FATAL") || strstr(l, "crash") || strstr(l, "exception")) snprintf(last, sizeof last, "%s", l);
+            l = e ? e + 1 : NULL;
+        }
+    }
+    wchar_t wl[400], msg[1400];
+    MultiByteToWideChar(CP_UTF8, 0, last, -1, wl, 400);
+    swprintf(msg, 1400,
+             lang ? L"The game closed because of an error (code %lu).\n\n%ls%lsThe details are in:\n%ls\n\nWhen reporting it, "
+                    L"attach that file. Open the logs folder?"
+                  : L"O jogo fechou por causa de um erro (código %lu).\n\n%ls%lsOs detalhes estão em:\n%ls\n\nAo relatar o "
+                    L"problema, anexe esse arquivo. Abrir a pasta de logs?",
+             code, wl, wl[0] ? L"\n\n" : L"", logp);
+    if (MessageBoxW(NULL, msg, L"Splatoon Raiders Recomp", MB_YESNO | MB_ICONERROR) == IDYES)
+        ShellExecuteW(NULL, L"open", logs, NULL, NULL, SW_SHOWNORMAL);
+}
+
 static void start_game(void) {
     wchar_t game[MAX_PATH + 40];
     swprintf(game, MAX_PATH + 40, L"%lsSplatoonRaiders.exe", exe_dir);
@@ -1115,7 +1488,8 @@ static void start_game(void) {
         InvalidateRect(w_page, NULL, FALSE);
         return;
     }
-    CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    game_proc = pi.hProcess;   // watched after the window closes (watch_game)
     DestroyWindow(w_main);
 }
 static void play(void) {
@@ -1149,6 +1523,8 @@ static void click(int id) {
     else if (id == Z_BACK) { memset(&ck_new, 0, sizeof ck_new); set_page(P_PLAY); InvalidateRect(w_page, NULL, FALSE); }
     else if (id == Z_PREP) start_shader_prep(0);
     else if (id == Z_SETUP) start_setup();
+    else if (id == Z_IMPORT) import_save();
+    else if (id == Z_UPDATE) open_update();
     else if (id == Z_OPEN_DIR) ShellExecuteW(w_main, L"open", exe_dir, NULL, NULL, SW_SHOWNORMAL);
     else if (id == Z_SAVE && dirty) { save_settings(); nx2_cfg_set_lang(nx2_cfg_find("language")->value); relang(); }
     else if (id == Z_REVERT && dirty) {
@@ -1177,7 +1553,7 @@ static void draw_combo_item(const DRAWITEMSTRUCT *di) {
     wchar_t t[160] = L"";
     SendMessageW(di->hwndItem, CB_GETLBTEXT, di->itemID, (LPARAM)t);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, !edit && sel ? C_ACCENT : C_TEXT);
+    SetTextColor(dc, !edit && sel ? C_ON_ACCENT : C_TEXT);   // dark on the yellow highlight
     SelectObject(dc, f_body);
     r.left += S(10);
     DrawTextW(dc, t, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -1222,6 +1598,13 @@ static LRESULT CALLBACK page_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (HIWORD(w) == CBN_SELCHANGE) {
             int i = LOWORD(w) - ID_COMBO;
             Setting *s = nx2_cfg_at(i);
+            if (s && !strcmp(s->key, "preset")) {   // the preset's values into their lists
+                int k = combo_value(i);
+                if (k > 0) apply_preset_combos(k);
+            } else if (s && is_preset_key(s->key)) {   // changed by hand: no longer a preset
+                int pi = setting_index("preset");
+                if (pi >= 0 && combos[pi]) SendMessageW(combos[pi], CB_SETCURSEL, 0, 0);
+            }
             if (s && !strcmp(s->key, "language")) {   // the new language at once
                 int k = combo_value(i);
                 if (k >= 0) nx2_cfg_set_lang(s->values[k]);
@@ -1328,6 +1711,10 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_TIMER:
         if (prep_state == 1 || sp_state || su_state) InvalidateRect(w_page, NULL, FALSE);
         return 0;
+    case WM_APP_UPDATE:
+        layout_page();
+        InvalidateRect(w_page, NULL, FALSE);
+        return 0;
     case WM_APP_SETUP:
         KillTimer(h, 3);
         InterlockedExchange(&su_state, 0);
@@ -1377,7 +1764,11 @@ int launcher_ui_run(void) {
     GdiplusStartup(&gp, &gi, NULL);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     program_dir();
+    wchar_t ini[MAX_PATH + 16];
+    _snwprintf(ini, MAX_PATH + 16, L"%lssplatoon.ini", exe_dir);
+    int first_run = GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES;
     nx2_cfg_load();
+    if (first_run) first_run_preset();
     nx2_cfg_set_lang(nx2_cfg_find("language")->value);
     lang = nx2_cfg_lang();
     refresh_files();
@@ -1440,6 +1831,7 @@ int launcher_ui_run(void) {
     ShowWindow(w_main, SW_SHOW);
     SetForegroundWindow(w_main);
     SetFocus(w_page);
+    start_update_check();
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (msg.message == WM_MOUSEWHEEL) {   // the wheel scrolls the page (never changes a closed combo's choice)
@@ -1451,5 +1843,6 @@ int launcher_ui_run(void) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    watch_game();
     return 0;
 }

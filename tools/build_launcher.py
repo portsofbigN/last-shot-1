@@ -37,7 +37,7 @@ def main():
            '-include', str(ROOT / 'host' / 'sp_compat.h'),
            str(ROOT / 'host' / 'launcher_main.c'), str(ROOT / 'host' / 'launcher_ui.c'), str(ROOT / 'host' / 'nx2_settings.c'), str(ROOT / 'host' / 'nx2_pcache.c'),
            '-o', str(OUT), str(res), str(VULKAN / 'Lib' / 'vulkan-1.lib'),
-           '-luser32', '-lgdi32', '-lgdiplus', '-lbcrypt', '-lshcore', '-lshell32', '-lole32', '-ladvapi32', '-Wl,/SUBSYSTEM:WINDOWS']
+           '-luser32', '-lgdi32', '-lgdiplus', '-lbcrypt', '-lshcore', '-lshell32', '-lole32', '-ladvapi32', '-ldxgi', '-ldxguid', '-lwinhttp', '-Wl,/SUBSYSTEM:WINDOWS']
     subprocess.run(cmd, check=True)
     if '--zip' not in sys.argv:   # the launcher alone (no Set up): only on request; the release is tools/package_setup.py
         print(f'{OUT} ({OUT.stat().st_size // 1024} KiB)')

@@ -38,7 +38,7 @@ static VkCommandPool cpool;
 static VkCommandBuffer cb;   // the current slot's
 static VkFence fence;
 static int recording, rendering;
-#define STAGE_SIZE (384ull << 20)   // NSLOT parts of SLOT_STAGE
+#define STAGE_SIZE (768ull << 20)   // NSLOT parts of SLOT_STAGE (128 MiB each)
 static VkBuffer stage_buf;
 static VkDeviceMemory stage_mem;
 static uint8_t *stage_ptr;
@@ -80,6 +80,26 @@ uint64_t nx2_stat_submit_ns, nx2_stat_wait_ns, nx2_stat_pipes;
 volatile int nx2_dump_request;   // set by nx2_vk.c (NX2_DUMP_ON_BLACK)   // pipeline builds: shader translation, driver pipeline creation
 // CPU time of the draw phases (TSC ticks), in the "prof:" report
 #include <x86intrin.h>
+
+// Full barriers only when the GPU has been given work that writes since the last one (gpu_dirty): two barriers with
+// nothing but state, binds or queries between them order nothing more than one. Every command that writes memory
+// is recorded through these wrappers (an inner name is the real function: macros do not expand themselves).
+static int gpu_dirty = 1;
+#define vkCmdDraw(...) (gpu_dirty = 1, vkCmdDraw(__VA_ARGS__))
+#define vkCmdDrawIndexed(...) (gpu_dirty = 1, vkCmdDrawIndexed(__VA_ARGS__))
+#define vkCmdDrawIndirect(...) (gpu_dirty = 1, vkCmdDrawIndirect(__VA_ARGS__))
+#define vkCmdDrawIndexedIndirect(...) (gpu_dirty = 1, vkCmdDrawIndexedIndirect(__VA_ARGS__))
+#define vkCmdDispatch(...) (gpu_dirty = 1, vkCmdDispatch(__VA_ARGS__))
+#define vkCmdCopyBuffer(...) (gpu_dirty = 1, vkCmdCopyBuffer(__VA_ARGS__))
+#define vkCmdCopyImage(...) (gpu_dirty = 1, vkCmdCopyImage(__VA_ARGS__))
+#define vkCmdCopyBufferToImage(...) (gpu_dirty = 1, vkCmdCopyBufferToImage(__VA_ARGS__))
+#define vkCmdCopyImageToBuffer(...) (gpu_dirty = 1, vkCmdCopyImageToBuffer(__VA_ARGS__))
+#define vkCmdBlitImage(...) (gpu_dirty = 1, vkCmdBlitImage(__VA_ARGS__))
+#define vkCmdClearColorImage(...) (gpu_dirty = 1, vkCmdClearColorImage(__VA_ARGS__))
+#define vkCmdClearDepthStencilImage(...) (gpu_dirty = 1, vkCmdClearDepthStencilImage(__VA_ARGS__))
+#define vkCmdClearAttachments(...) (gpu_dirty = 1, vkCmdClearAttachments(__VA_ARGS__))
+#define vkCmdFillBuffer(...) (gpu_dirty = 1, vkCmdFillBuffer(__VA_ARGS__))
+#define vkCmdCopyQueryPoolResults(...) (gpu_dirty = 1, vkCmdCopyQueryPoolResults(__VA_ARGS__))
 enum { DP_START, DP_PIPE, DP_CONST, DP_IMGS, DP_DESC, DP_VTX, DP_CMD, DP_UPLOAD, DP_LOOKUP, DP_IMAGE, DP_LAYOUT, DP_N };
 static uint64_t dp_ssbo_bytes, dp_ssbo_n;
 static uint64_t th_n, th_bytes, th_big, th_skipped;   // CPU texture change checks (storage_hash) for "prof:"
@@ -107,7 +127,8 @@ static int nmfix;
 // runs one submission while the next is replayed. A slot's staging part, device ring part, descriptor pool and the
 // objects that died while it was recorded (imports, images) are reused or destroyed once its fence has signalled
 // (slot_retire). The game waits through its sync objects (nx2_vk_wait_serial). NX2_SYNC_SUBMIT=1: every flush waits.
-#define NSLOT 3
+#define NSLOT 6   // submissions in flight: a frame goes out in ~12 (draw chunks, the game's submits); with 3 the CPU
+                 // waited for the GPU every few and the GPU sat idle a third of the time in the missions
 #define SLOT_STAGE (STAGE_SIZE / NSLOT)
 typedef struct {
     VkCommandBuffer cb;
@@ -283,8 +304,102 @@ static int occ_since_wait;   // GPU counts queued since the last wait for the GP
 static int occ_open;   // a reset without its report yet
 static uint32_t occ_parts[OCC_PARTS];
 static int occ_nparts;
-static struct { uint64_t addr; uint32_t parts[OCC_PARTS]; int n; int64_t fixed; } occ_sum[512];
-static int nocc_sum;
+// Counts to finish when the submission is done (nx2_vk_submit_end): occ_sum, counts in parts (or that the GPU cannot
+// copy into the game's memory) added up on the CPU; occ_ts, counts the GPU copied, whose timestamp is written then.
+// Both grow as needed: a fixed 512 overflowed in the missions (about 2% of the ink checks fell back to the estimate,
+// 1 sample: the squid stayed visible in its ink and could not climb).
+typedef struct { uint64_t addr; uint32_t parts[OCC_PARTS]; int n; int64_t fixed; } OccSum;
+static OccSum *occ_sum;
+static int nocc_sum, cap_sum;
+static uint64_t *occ_ts;
+static int nocc_ts, cap_ts;
+static OccSum *occ_sum_push(uint64_t addr) {
+    if (nocc_sum == cap_sum) {
+        int c = cap_sum ? cap_sum * 2 : 1024;
+        OccSum *n = realloc(occ_sum, (size_t)c * sizeof *n);
+        if (!n) return NULL;
+        occ_sum = n, cap_sum = c;
+    }
+    OccSum *o = &occ_sum[nocc_sum++];
+    memset(o, 0, sizeof *o);
+    o->addr = addr;
+    return o;
+}
+// NX2_OCC_ASYNC (default on; =0 the old way): the counts of a submission are added up and written, then their
+// timestamps, by a thread of their own once the GPU has them, instead of the game's thread waiting for the whole
+// submission (12 waits a frame in the missions: the CPU and the GPU never worked at the same time, 45-55 fps).
+// The game takes a written timestamp as "the GPU is done", as on the console, so it never reads a count too early.
+static int occ_async(void) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("NX2_OCC_ASYNC") && *getenv("NX2_OCC_ASYNC") == '0');
+    return on;
+}
+static PlatMutex rq_lock = PLAT_MUTEX_INIT;
+static PlatCond rq_cond;
+static OccSum *rq;
+static int nrq, caprq, rq_started;
+static void occ_resolver(void *arg) {
+    (void)arg;
+    OccSum *work = NULL;
+    int capw = 0;
+    for (;;) {
+        plat_mutex_lock(&rq_lock);
+        while (!nrq) plat_cond_wait(&rq_cond, &rq_lock);
+        int n = nrq;
+        if (capw < n) {
+            OccSum *w2 = realloc(work, (size_t)n * sizeof *w2);
+            if (w2) work = w2, capw = n;
+        }
+        if (capw < n) n = capw;
+        memcpy(work, rq, (size_t)n * sizeof *work);
+        memmove(rq, rq + n, (size_t)(nrq - n) * sizeof *rq);
+        nrq -= n;
+        plat_mutex_unlock(&rq_lock);
+        for (int i = 0; i < n; i++) {
+            uint64_t sum = (uint64_t)work[i].fixed;
+            for (int k = 0; k < work[i].n; k++) {
+                uint64_t v = 0;
+                if (vkGetQueryPoolResults(D, occ_pool, work[i].parts[k], 1, sizeof v, &v, 8,
+                                          VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS)
+                    sum += v;
+            }
+            __atomic_store_n((uint64_t *)(uintptr_t)work[i].addr, sum, __ATOMIC_RELEASE);
+            __atomic_store_n((uint64_t *)(uintptr_t)(work[i].addr + 8), plat_now_ns() * 12 / 625, __ATOMIC_RELEASE);
+        }
+    }
+}
+static void occ_hand_over(void) {   // after the submission that ends these queries: to the resolver thread
+    if (!nocc_sum) return;
+    plat_mutex_lock(&rq_lock);
+    if (!rq_started) {
+        rq_started = 1;
+        plat_cond_init(&rq_cond);
+        plat_thread_spawn(occ_resolver, NULL, "occ resolver", 0);
+    }
+    if (nrq + nocc_sum > caprq) {
+        int c = caprq ? caprq : 1024;
+        while (c < nrq + nocc_sum) c *= 2;
+        OccSum *n2 = realloc(rq, (size_t)c * sizeof *n2);
+        if (n2) rq = n2, caprq = c;
+    }
+    if (nrq + nocc_sum <= caprq) {
+        memcpy(rq + nrq, occ_sum, (size_t)nocc_sum * sizeof *rq);
+        nrq += nocc_sum;
+    }
+    plat_cond_signal(&rq_cond);
+    plat_mutex_unlock(&rq_lock);
+    nocc_sum = 0;
+}
+static int occ_ts_push(uint64_t addr) {
+    if (nocc_ts == cap_ts) {
+        int c = cap_ts ? cap_ts * 2 : 1024;
+        uint64_t *n = realloc(occ_ts, (size_t)c * sizeof *n);
+        if (!n) return 0;
+        occ_ts = n, cap_ts = c;
+    }
+    occ_ts[nocc_ts++] = addr;
+    return 1;
+}
 static void occ_keep_part(void) {   // the running query ends here: one part of the open count
     if (occ_open && occ_nparts < OCC_PARTS) occ_parts[occ_nparts++] = (uint32_t)occ_active;
     else occ_broken++;
@@ -379,7 +494,11 @@ int nx2_vk_wait_serial(uint64_t serial, uint64_t timeout_ns) {
 static VkDeviceSize stage_alloc(VkDeviceSize n, VkDeviceSize align) {   // an offset in stage_buf (this slot's part)
     VkDeviceSize off = (stage_off + align - 1) & ~(align - 1);
     if (off + n > SLOT_STAGE) {
-        if (n > SLOT_STAGE) rt_fatal("vulkan: staging request of %llu bytes", (unsigned long long)n);
+        if (n > SLOT_STAGE) {
+            void log_uploading(unsigned long long n);
+            log_uploading((unsigned long long)n);
+            rt_fatal("vulkan: staging request of %llu bytes", (unsigned long long)n);
+        }
         flush();
         begin_cb();
         off = 0;
@@ -493,7 +612,14 @@ static int active(void) {
     return 1;
 }
 
-static void barrier_all(void) {   // a full memory barrier: correct, not fast
+static uint64_t prof_barriers, prof_barrier_at[64];   // full barriers this profile interval, by source line (/64)
+#define barrier_all() barrier_all_at(__LINE__)
+static void barrier_all_at(int line) {   // a full memory barrier: correct, not fast
+    static int keep = -1;   // NX2_ALL_BARRIERS=1: every barrier, as before
+    if (keep < 0) keep = getenv("NX2_ALL_BARRIERS") != NULL;
+    if (!gpu_dirty && !keep) return;
+    gpu_dirty = 0;
+    prof_barriers++, prof_barrier_at[(line / 64) & 63]++;
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT,
                           VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
@@ -596,8 +722,6 @@ static uint64_t *mpages;
 static uint64_t mpages_cap;
 static uint64_t mp_copied, mp_syncs, mp_regions;   // statistics for "prof:"
 static void end_rendering(void);
-static void barrier_all(void);
-
 static int mirror_pages_room(uint64_t size) {
     uint64_t need = size / 4096 + 1;
     if (need <= mpages_cap) return 1;
@@ -1364,8 +1488,46 @@ static int tex_changed(Img *m) {
 // CPU contents -> image (textures the GPU writes are never uploaded). Uploaded again when the game wrote texels
 // (WriteTexels) or, for textures up to 64 MiB, when the storage changed (glyph caches and other CPU-filled textures
 // are written in place); the contents are hashed at most once a frame.
+// ASTC decoding of a band of block rows, split across the CPU's cores when large (the 11000x8000 treasure map took
+// 0.9 s on one core the first time the map opened)
+typedef struct { const uint8_t *blocks; size_t pitch; uint32_t w, h, bw, bh; int srgb; uint8_t *out; } AstcJob;
+static void astc_worker(void *a) {
+    const AstcJob *j = a;
+    astc_decode_ldr(j->blocks, j->w, j->h, j->bw, j->bh, j->srgb, j->out);
+}
+static void astc_band(const uint8_t *blocks, size_t pitch, uint32_t w, uint32_t h, uint32_t bw, uint32_t bh, int srgb,
+                      uint8_t *out) {
+    uint32_t brows = (h + bh - 1) / bh;
+    uint32_t nt = plat_cpu_count();
+    if (nt > 16) nt = 16;
+    if ((uint64_t)w * h < (4u << 20) || nt < 2 || brows < nt) {
+        astc_decode_ldr(blocks, w, h, bw, bh, srgb, out);
+        return;
+    }
+    AstcJob jobs[16];
+    PlatThread *th[16];
+    uint32_t per = (brows + nt - 1) / nt, n = 0;
+    for (uint32_t r = 0; r < brows; r += per, n++) {
+        uint32_t nb = brows - r < per ? brows - r : per, y0 = r * bh, hh = nb * bh;
+        if (y0 + hh > h) hh = h - y0;
+        jobs[n] = (AstcJob){blocks + (size_t)r * pitch, pitch, w, hh, bw, bh, srgb, out + (size_t)y0 * w * 4};
+        th[n] = plat_thread_new(astc_worker, &jobs[n], "astc");
+        if (!th[n]) astc_worker(&jobs[n]);
+    }
+    for (uint32_t i = 0; i < n; i++)
+        if (th[i]) plat_thread_join(th[i]);
+}
+
+const Img *g_uploading;   // the texture being uploaded (for the staging overflow message)
+void log_uploading(unsigned long long n) {
+    const Img *m = g_uploading;
+    if (m)
+        rt_log("vkdraw: staging %llu bytes; last texture uploaded %#llx %ux%ux%u layers %u levels %u format %#x (vk %d)", n,
+               (unsigned long long)m->obj, m->w, m->h, m->depth, m->layers, m->levels, m->d.format, (int)m->fmt);
+}
 static void img_upload(Img *m) {
     if (m->failed || m->gpu || !m->storage) return;
+    g_uploading = m;
     if (m->uploaded) {
         static int off = -1;
         if (off < 0) off = getenv("NX2_NO_REUPLOAD") != NULL;
@@ -1419,13 +1581,36 @@ static void img_upload(Img *m) {
         for (uint32_t layer = 0; layer < m->layers; layer++) {
             if (m->f.astc_bw) {
                 if (blocks_n < bytes) free(blocks), blocks = malloc(bytes), blocks_n = bytes;
-                VkDeviceSize off = stage_alloc((VkDeviceSize)w * h * 4 * z, 16);
                 if (!blocks || nvn_deswizzle(&m->d, level, layer, m->storage, blocks, pitch)) continue;
+                // decoded to RGBA8 in bands of block rows that fit the staging ring: the treasure map is an
+                // 11000x8000 ASTC texture, 352 MB decoded (more than a slot of the ring: it was a fatal error)
+                uint32_t bh = (uint32_t)m->f.astc_bh, band = (uint32_t)((SLOT_STAGE / 4) / ((VkDeviceSize)w * 4 * bh));
+                if (band < 1) band = 1;
+                // on the GPU (nx2_astcgpu.c) when it can: only the raw blocks go through the ring
+                uint32_t nx2_astc_gpu_rows(VkDevice, VkPhysicalDevice, VkBuffer, VkDeviceSize, uint32_t);
+                int nx2_astc_gpu_band(VkCommandBuffer, VkDeviceSize, uint32_t, uint32_t, uint32_t, uint32_t, int, VkImage,
+                                      VkImageAspectFlags, uint32_t, uint32_t, int32_t, int32_t);
+                uint32_t grows = nx2_astc_gpu_rows(D, V->phys, stage_buf, STAGE_SIZE, w) / bh;
+                if (grows) band = grows;
                 for (uint32_t sl = 0; sl < z; sl++)
-                    astc_decode_ldr(blocks + sl * pitch * rows, w, h, m->f.astc_bw, m->f.astc_bh, m->f.astc_srgb,
-                                    stage_ptr + off + (size_t)sl * w * h * 4);
-                VkBufferImageCopy cp = {off, 0, 0, {m->aspect, level, layer, 1}, {0, 0, 0}, {w, h, z}};
-                vkCmdCopyBufferToImage(cb, stage_buf, m->img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+                    for (uint32_t br = 0; br < (uint32_t)rows; br += band) {
+                        uint32_t nb = (uint32_t)rows - br < band ? (uint32_t)rows - br : band;
+                        uint32_t y0 = br * bh, hh = nb * bh;
+                        if (y0 + hh > h) hh = h - y0;
+                        if (grows) {
+                            VkDeviceSize n = (VkDeviceSize)nb * pitch, so = stage_alloc(n, 16);
+                            memcpy(stage_ptr + so, blocks + sl * pitch * rows + (size_t)br * pitch, n);
+                            gpu_dirty = 1;
+                            if (nx2_astc_gpu_band(cb, so, w, hh, m->f.astc_bw, m->f.astc_bh, m->f.astc_srgb, m->img, m->aspect,
+                                                  level, layer, (int32_t)y0, (int32_t)sl))
+                                continue;
+                        }
+                        VkDeviceSize off = stage_alloc((VkDeviceSize)w * hh * 4, 16);
+                        astc_band(blocks + sl * pitch * rows + (size_t)br * pitch, pitch, w, hh, m->f.astc_bw, m->f.astc_bh,
+                                  m->f.astc_srgb, stage_ptr + off);
+                        VkBufferImageCopy cp = {off, 0, 0, {m->aspect, level, layer, 1}, {0, (int32_t)y0, (int32_t)sl}, {w, hh, 1}};
+                        vkCmdCopyBufferToImage(cb, stage_buf, m->img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+                    }
                 continue;
             }
             VkDeviceSize off = stage_alloc(bytes, 16);
@@ -3726,7 +3911,11 @@ void nx2_vk_submit_end(void) {
     mirror_epoch++;   // the next submit syncs the mirrors first
     static int sync = -1;   // NX2_OCC_SYNC=0 (debug): do not wait for submissions with samples counts
     if (sync < 0) sync = !(getenv("NX2_OCC_SYNC") && *getenv("NX2_OCC_SYNC") == '0');
-    if (sync && occ_since_wait) {   // the game reads the counts once its submit returns, as from the console's GPU
+    if (occ_since_wait && occ_async()) {   // submitted now; the resolver thread finishes the counts (occ_resolver)
+        flush();
+        occ_hand_over();
+        occ_since_wait = 0;
+    } else if (sync && occ_since_wait) {   // the game reads the counts once its submit returns, as from the console's GPU
         uint64_t t0 = plat_now_ns();
         flush_wait();
         nx2_prof_wait_ns += plat_now_ns() - t0;
@@ -3751,6 +3940,10 @@ void nx2_vk_submit_end(void) {
                        (unsigned long long)occ_sum[i].addr, occ_sum[i].n, (unsigned long long)sum);
         }
         nocc_sum = 0;
+        uint64_t ts = plat_now_ns() * 12 / 625;
+        for (int i = 0; i < nocc_ts; i++)   // the counts the GPU copied: written by now, then their timestamps
+            __atomic_store_n((uint64_t *)(uintptr_t)(occ_ts[i] + 8), ts, __ATOMIC_RELEASE);
+        nocc_ts = 0;
     } else {
         flush();
     }
@@ -3836,6 +4029,16 @@ int nx2_vk_present_texture(uint64_t obj, uint64_t frame) {
                     for (int k = 0; k < DP_N; k++)
                         o += (size_t)snprintf(line + o, sizeof line - o, " %s %.2f", dp_name[k],
                                               (double)dp_ticks[k] / per_ns * ms);
+                    {
+                        char bl[512];
+                        size_t bo = 0;
+                        for (int k = 0; k < 64; k++)
+                            if (prof_barrier_at[k] / n >= 1 && bo < sizeof bl - 32)
+                                bo += (size_t)snprintf(bl + bo, sizeof bl - bo, " L%d:%.0f", k * 64, prof_barrier_at[k] / n);
+                        rt_log("prof:   full barriers %.0f/frame (by line /64:%s)", prof_barriers / n, bl);
+                        prof_barriers = 0;
+                        memset(prof_barrier_at, 0, sizeof prof_barrier_at);
+                    }
                     rt_log("prof:   pipeline builds: translation %.2f ms/frame, driver %.2f ms/frame", prof_xlate_ns * ms,
                            prof_vkpipe_ns * ms);
                     prof_xlate_ns = prof_vkpipe_ns = 0;
@@ -4240,6 +4443,7 @@ void nx2_vk_dispatch(uint32_t gx, uint32_t gy, uint32_t gz) {
         int crop[4] = {sx, sy, sw, sh}, outr[4] = {dx, dy, dw, dh};
         {   // anti-aliasing first (NX2_AA, nx2_aa.c): the game's upscaler did it, and FSR / NIS do not
             int nx2_aa_apply(VkDevice, VkCommandBuffer, VkImage, VkFormat, VkImageView, uint32_t, uint32_t, const int[4]);
+            gpu_dirty = 1;
             int aa_ok = nx2_aa_apply(D, cb, g_bound_tex->img, g_bound_tex->fmt, img_storage_view(g_bound_tex, NX2X_T_2D),
                                      g_bound_tex->w, g_bound_tex->h, crop);
             static int naa;
@@ -4247,6 +4451,7 @@ void nx2_vk_dispatch(uint32_t gx, uint32_t gy, uint32_t gz) {
                                (int)g_bound_tex->fmt, aa_ok ? "on" : "not applied");
         }
         VkImageView sv = img_view(g_bound_tex, NX2X_T_2D);
+        gpu_dirty = 1;
         int fsr_ok = sv && nx2_fsr_upscale(D, cb, sv, VK_IMAGE_LAYOUT_GENERAL, (int)g_bound_tex->w, (int)g_bound_tex->h,
                                            crop, g_bound_wimg->img, VK_IMAGE_LAYOUT_GENERAL, outr);
         static int nfl;
@@ -4260,6 +4465,7 @@ void nx2_vk_dispatch(uint32_t gx, uint32_t gy, uint32_t gz) {
         if (g_bound_wimg->fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
             int nx2_srgb_decode(VkDevice, VkCommandBuffer, VkImageView, const int[4]);
             nx2_srgb_decode(D, cb, img_storage_view(g_bound_wimg, NX2X_T_2D), outr);
+            gpu_dirty = 1;
         } else {
             static int nfmt;
             if (!nfmt++) rt_log("vkdraw: upscaler output format %d: not turned linear", (int)g_bound_wimg->fmt);
@@ -4508,8 +4714,9 @@ int nx2_vk_counter_report(uint64_t addr) {
         occ_active = -1;
         static int late = -1;   // NX2_FAKE_LATE=1: the fake count written when the submission is done, as the GPU's
         if (late < 0) late = getenv("NX2_FAKE_LATE") != NULL;
-        if (late && nocc_sum < 512) {
-            occ_sum[nocc_sum].addr = addr, occ_sum[nocc_sum].n = 0, occ_sum[nocc_sum++].fixed = fake_now;
+        OccSum *os_ = late ? occ_sum_push(addr) : NULL;
+        if (os_) {
+            os_->fixed = fake_now;
             occ_since_wait = 1;
         } else {
             *(volatile uint64_t *)(uintptr_t)addr = (uint64_t)fake_now;
@@ -4520,33 +4727,31 @@ int nx2_vk_counter_report(uint64_t addr) {
         return 1;
     }
     if (tracing()) rt_log("trace   counter report at %#llx: query %d", (unsigned long long)addr, occ_active);
-    if (occ_pool && occ_open && (occ_nparts > 0 || occ_active >= 0)) {   // resolved after the submission (one or more parts)
+    if (occ_pool && occ_open && (occ_nparts > 0 || occ_active >= 0)) {
         begin_cb();
+        int whole = occ_nparts == 0;   // one query from the reset to here
         if (occ_active >= 0) {
-            if (!occ_in_r) end_rendering();
+            if (!occ_in_r) end_rendering();   // begun outside rendering: ends outside
             vkCmdEndQuery(cb, occ_pool, (uint32_t)occ_active);
             occ_keep_part();
             occ_active = -1;
         }
-        if (nocc_sum < (int)(sizeof occ_sum / sizeof *occ_sum)) {
-            occ_sum[nocc_sum].addr = addr, occ_sum[nocc_sum].n = occ_nparts, occ_sum[nocc_sum].fixed = 0;
-            memcpy(occ_sum[nocc_sum++].parts, occ_parts, sizeof occ_parts);
-            occ_since_wait = ok = 1;
-            static int nlog;
-            if (occ_nparts > 1 && nlog++ < 4) rt_log("vkdraw: a samples count cut in %d parts, added up", occ_nparts);
-        }
-        occ_open = 0, occ_nparts = 0;
-    } else if (occ_pool && occ_active >= 0) {
-        occ_open = 0, occ_nparts = 0;
-        begin_cb();
-        if (!occ_in_r) end_rendering();   // begun outside rendering: ends outside
-        vkCmdEndQuery(cb, occ_pool, (uint32_t)occ_active);
-        if (buffer_at(addr, 8, 8, &b, &o)) {
+        if (!occ_async() && whole && occ_nparts == 1 && buffer_at(addr, 8, 8, &b, &o) && occ_ts_push(addr)) {
+            // the GPU copies the count into the game's memory; its timestamp is written once the submission is done
             if (nocc_copy == (int)(sizeof occ_copy / sizeof *occ_copy)) occ_copy_all();
-            occ_copy[nocc_copy].q = (uint32_t)occ_active, occ_copy[nocc_copy].buf = b, occ_copy[nocc_copy++].off = o;
+            occ_copy[nocc_copy].q = occ_parts[0], occ_copy[nocc_copy].buf = b, occ_copy[nocc_copy++].off = o;
             occ_since_wait = ok = 1;
+        } else {
+            OccSum *os_ = occ_sum_push(addr);   // added up on the CPU after the submission
+            if (os_) {
+                os_->n = occ_nparts;
+                memcpy(os_->parts, occ_parts, sizeof occ_parts);
+                occ_since_wait = ok = 1;
+                static int nlog;
+                if (occ_nparts > 1 && nlog++ < 4) rt_log("vkdraw: a samples count cut in %d parts, added up", occ_nparts);
+            }
         }
-        occ_active = -1;
+        occ_open = 0, occ_nparts = 0;
     }
     if (ok) occ_gpu++;
     else occ_est++;

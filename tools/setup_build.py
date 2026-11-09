@@ -6,7 +6,8 @@
   4. link: <program>/SplatoonRaiders.exe against SplatoonRaiders_rt.dll (the runtime, shipped built)
 
 Every step keeps its results, so a stopped set up continues where it was. Progress on stdout, one line each:
-"step <name>", "build <done> <total>", "done", or "error <text>".
+"step <name>", "build <done> <total>", "bytes <done KiB> <total KiB>" (source compiled, for the time left), "done",
+or "error <text>".
 
 Usage: setup_build.py --game DIR --program DIR [--work DIR] [--zig PATH] [--jobs N]
 """
@@ -129,8 +130,13 @@ def main():
     go = obj / 'glue.o'
     jobs.append((glue, go, ['-I', str(inc), '-I', str(host_inc), '-I', str(gen)]))
     total, done = len(srcs) + 1, len(srcs) + 1 - len(jobs)
+    # the largest files first, so the last ones running at the end are small and every core stays busy
+    jobs.sort(key=lambda j: -j[0].stat().st_size)
+    kb_total = sum(j[0].stat().st_size for j in jobs) // 1024 + 1
+    kb_done = 0
     say('step compile')
     say(f'build {done} {total}')
+    say(f'bytes 0 {kb_total}')
 
     def cc(job):
         s, o, inc_args = job
@@ -144,12 +150,15 @@ def main():
 
     failed = None
     with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
-        for s, err in ex.map(cc, jobs):
+        for f in cf.as_completed([ex.submit(cc, j) for j in jobs]):   # as they finish, not in order
+            s, err = f.result()
             if err:
                 failed = failed or (s, err)
                 sys.stderr.write(f'{s}: {err}\n')
             done += 1
+            kb_done += s.stat().st_size // 1024
             say(f'build {done} {total}')
+            say(f'bytes {kb_done} {kb_total}')
     if failed:
         say(f'error compiling {failed[0].name} failed')
         return 4

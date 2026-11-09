@@ -29,12 +29,13 @@ static const char *const n_size[] = {"1280 x 720", "1600 x 900", "1920 x 1080", 
 static const char *const v_full[] = {"0", "1"};
 static const char *const n_full[] = {"Janela", "Tela cheia (sem bordas)"};
 static const char *const e_full[] = {"Windowed", "Fullscreen (borderless)"};
-static const char *const v_fps[] = {"30", "60", "120", "0"};
-static const char *const n_fps[] = {"30 FPS", "60 FPS (recomendado)", "120 FPS (experimental)", "Sem limite"};
-static const char *const e_fps[] = {"30 FPS", "60 FPS (recommended)", "120 FPS (experimental)", "Unlimited"};
+static const char *const v_fps[] = {"60", "30"};
+static const char *const n_fps[] = {"60 FPS (recomendado)", "30 FPS (PCs modestos)"};
+static const char *const e_fps[] = {"60 FPS (recommended)", "30 FPS (modest PCs)"};
 static const char *const v_onoff[] = {"0", "1"};
-static const char *const n_vsync[] = {"Desligado (menor latência)", "Ligado"};
-static const char *const e_vsync[] = {"Off (lower latency)", "On"};
+static const char *const v_vsync[] = {"0", "1", "vrr"};
+static const char *const n_vsync[] = {"Desligado (menor latência)", "Ligado", "G-SYNC / FreeSync"};
+static const char *const e_vsync[] = {"Off (lower latency)", "On", "G-SYNC / FreeSync"};
 static const char *const v_overlay[] = {"off", "fps", "full"};
 static const char *const n_overlay[] = {"Desligado", "Só FPS", "Completo (FPS, tempos, memória)"};
 static const char *const e_overlay[] = {"Off", "FPS only", "Full (FPS, timings, memory)"};
@@ -61,9 +62,12 @@ static const char *const e_scaler[] = {"AMD FSR 1", "NVIDIA Image Scaling (NIS)"
 static const char *const v_sharp[] = {"0", "50", "80", "100"};
 static const char *const n_sharp[] = {"Sem nitidez extra", "Média", "Alta (recomendado)", "Máxima"};
 static const char *const e_sharp[] = {"No extra sharpening", "Medium", "High (recommended)", "Maximum"};
-static const char *const v_aniso[] = {"16", "8", "4", "0"};
-static const char *const n_aniso[] = {"16x (recomendado)", "8x", "4x", "Do jogo (desligado)"};
-static const char *const e_aniso[] = {"16x (recommended)", "8x", "4x", "The game's (off)"};
+static const char *const v_aniso[] = {"0", "4", "8", "16"};
+static const char *const n_aniso[] = {"Do jogo (desligado, recomendado)", "4x", "8x", "16x"};
+static const char *const e_aniso[] = {"The game's (off, recommended)", "4x", "8x", "16x"};
+static const char *const v_preset[] = {"custom", "low", "balanced", "high"};
+static const char *const n_preset[] = {"Personalizado", "Leve (PCs modestos, notebooks)", "Equilibrado (recomendado)", "Alto"};
+static const char *const e_preset[] = {"Custom", "Low (modest PCs, laptops)", "Balanced (recommended)", "High"};
 static const char *const v_aa[] = {"fxaa", "smaa", "off"};
 static const char *const n_aa[] = {"FXAA (recomendado)", "SMAA (mais nítido)", "Desligado"};
 static const char *const e_aa[] = {"FXAA (recommended)", "SMAA (sharper)", "Off"};
@@ -72,6 +76,9 @@ static const char *const n_layout[] = {"Posição do Switch (A à direita)", "Xb
 static const char *const e_layout[] = {"Switch positions (A on the right)", "Xbox / PlayStation (A at the bottom)"};
 static const char *const n_async[] = {"Esperar (sem falhas visuais)", "Em segundo plano (sem travadas)"};
 static const char *const e_async[] = {"Wait (no visual gaps)", "In the background (no stutter)"};
+static const char *const v_hdr[] = {"0", "1"};
+static const char *const n_hdr[] = {"Desligado", "Ligado (monitor HDR)"};
+static const char *const e_hdr[] = {"Off", "On (HDR monitor)"};
 static const char *const v_lang[] = {"auto", "pt", "en"};
 static const char *const n_lang[] = {"Automático (idioma do Windows)", "Português", "English"};
 static const char *const e_lang[] = {"Automatic (Windows language)", "Português", "English"};
@@ -87,25 +94,45 @@ static Setting settings[] = {
     {"mode", "NX2_OPERATION_MODE", "docked", {"Modo do console", "Console mode"}, v_mode, {n_mode, e_mode}, 2, CAT_DISPLAY,
      {"TV: o jogo gera imagem 4K (mais detalhe). Portátil: 1280x720, mais leve para PCs modestos.",
       "TV: the game renders a 4K picture (more detail). Handheld: 1280x720, lighter for modest PCs."}},
+    {"hdr", "NX2_HDR", "0", {"HDR", "HDR"}, v_hdr, {n_hdr, e_hdr}, 2, CAT_DISPLAY,
+     {"O jogo gera imagem HDR10, com brilhos mais intensos. Precisa de monitor HDR e do HDR ligado no Windows "
+      "(Configurações > Tela > Usar HDR); com o HDR do Windows desligado, o jogo continua em SDR.",
+      "The game renders an HDR10 picture with brighter highlights. Needs an HDR monitor with HDR on in Windows "
+      "(Settings > Display > Use HDR); with Windows HDR off the game stays SDR."}},
     {"upscaler", "NX2_UPSCALER", "fsr", {"Escala da imagem", "Image scaling"}, v_scaler, {n_scaler, e_scaler}, 3, CAT_IMAGE,
      {"Como a imagem é ampliada: AMD FSR 1 ou NVIDIA Image Scaling (mais nítidos) ou linear (mais suave).",
       "How the picture is upscaled: AMD FSR 1 or NVIDIA Image Scaling (sharper) or linear (softer)."}},
     {"antialias", "NX2_AA", "fxaa", {"Anti-aliasing", "Anti-aliasing"}, v_aa, {n_aa, e_aa}, 3, CAT_IMAGE,
      {"Suaviza o serrilhado das bordas. O jogo fazia isso no próprio upscaler, que o port substitui pelo FSR / NIS.",
       "Smooths jagged edges. The game did this in its own upscaler, which the port replaces with FSR / NIS."}},
-    {"anisotropic", "NX2_ANISO", "16", {"Filtragem anisotrópica", "Anisotropic filtering"}, v_aniso, {n_aniso, e_aniso}, 4,
+    {"anisotropic", "NX2_ANISO", "0", {"Filtragem anisotrópica", "Anisotropic filtering"}, v_aniso, {n_aniso, e_aniso}, 4,
      CAT_IMAGE,
-     {"Deixa nítidos o chão e as paredes vistos de lado ou ao longe. O jogo não usa; custo pequeno na GPU.",
-      "Keeps the ground and walls seen at an angle or far away sharp. The game uses none; small GPU cost."}},
+     {"Deixa nítidos o chão e as paredes vistos de lado ou ao longe. O jogo não usa. Pesa na GPU nas missões (16x: de 55 "
+      "para 45 FPS numa RTX 5060); use só se sobrar desempenho.",
+      "Keeps the ground and walls seen at an angle or far away sharp. The game uses none. It costs GPU time in the "
+      "missions (16x: from 55 to 45 FPS on an RTX 5060); use it only with performance to spare."}},
     {"sharpness", "NX2_SHARPNESS", "80", {"Nitidez", "Sharpness"}, v_sharp, {n_sharp, e_sharp}, 4, CAT_IMAGE,
      {"Quanto o FSR / NIS realçam os contornos depois de ampliar.",
       "How much FSR / NIS sharpen edges after upscaling."}},
-    {"fps", "NX2_FPS", "60", {"Limite de FPS", "Frame rate limit"}, v_fps, {n_fps, e_fps}, 4, CAT_PERF,
-     {"Quadros por segundo. 60 é o ritmo do console; acima disso é experimental.",
-      "Frames per second. 60 is the console's pace; above that is experimental."}},
-    {"vsync", "NX2_VSYNC", "0", {"VSync", "VSync"}, v_onoff, {n_vsync, e_vsync}, 2, CAT_PERF,
-     {"Ligado evita cortes na imagem (tearing); desligado tem menos atraso.",
-      "On avoids tearing; off has less input lag."}},
+    {"preset", NULL, "custom", {"Predefinição de qualidade", "Quality preset"}, v_preset, {n_preset, e_preset}, 4, CAT_PERF,
+     {"Ajusta de uma vez o modo do console, a escala, o anti-aliasing e a filtragem. Leve: imagem de 720p, para placas "
+      "integradas ou com pouca memória. Alto: SMAA e filtragem 4x, para placas com folga. Na primeira vez o launcher "
+      "escolhe pela sua placa de vídeo.",
+      "Sets the console mode, scaling, anti-aliasing and filtering at once. Low: a 720p picture, for integrated or "
+      "low-memory graphics. High: SMAA and 4x filtering, for cards with headroom. The first time, the launcher picks one "
+      "for your graphics card."}},
+    {"fps", "NX2_FPS", "60", {"Limite de FPS", "Frame rate limit"}, v_fps, {n_fps, e_fps}, 2, CAT_PERF,
+     {"Quadros por segundo. O jogo conta o tempo em quadros de 1/60 s: acima de 60 ele ficaria acelerado. 30 mantém a "
+      "velocidade certa com menos carga na placa.",
+      "Frames per second. The game counts time in 1/60 s frames: above 60 it would run too fast. 30 keeps the right "
+      "speed with less load on the graphics card."}},
+    {"vsync", "NX2_VSYNC", "0", {"VSync", "VSync"}, v_vsync, {n_vsync, e_vsync}, 3, CAT_PERF,
+     {"Ligado evita cortes na imagem (tearing); desligado tem menos atraso. G-SYNC / FreeSync: o monitor acompanha os "
+      "60 FPS do jogo, sem cortes nem trepidação (precisa de monitor compatível e, na NVIDIA, do G-SYNC ligado também "
+      "para janela no Painel de Controle).",
+      "On avoids tearing; off has less input lag. G-SYNC / FreeSync: the monitor follows the game's 60 FPS, with no "
+      "tearing or judder (needs a compatible monitor and, on NVIDIA, G-SYNC enabled for windowed mode in the Control "
+      "Panel)."}},
     {"overlay", "NX2_OVERLAY", "fps", {"Overlay de desempenho", "Performance overlay"}, v_overlay, {n_overlay, e_overlay},
      3, CAT_PERF,
      {"Mostra FPS e tempos no canto da tela. Durante o jogo, F1 alterna.",
@@ -119,6 +146,9 @@ static Setting settings[] = {
     {"rumble", "NX2_RUMBLE", "100", {"Vibração", "Rumble"}, v_rumble, {n_rumble, e_rumble}, 3, CAT_PAD,
      {"Força da vibração do controle (Xbox e PlayStation, com fio ou Bluetooth).",
       "Controller rumble strength (Xbox and PlayStation, wired or Bluetooth)."}},
+    {"triggers", "NX2_TRIGGERS", "1", {"Gatilhos adaptativos", "Adaptive triggers"}, v_onoff, {n_launch, e_launch}, 2, CAT_PAD,
+     {"DualSense: o R2 (atirar) fica com uma resistência leve, como um gatilho de arma. O L2 continua livre.",
+      "DualSense: R2 (shoot) gets a light resistance, like a weapon trigger. L2 stays free."}},
     {"motion", "NX2_GYRO", "1", {"Mira por movimento", "Motion aiming"}, v_motion, {n_motion, e_motion}, 2, CAT_PAD,
      {"Como no Switch: mova o controle para mirar (giroscópio do DualSense / DualShock 4). Outros controles usam o analógico R.",
       "As on the Switch: move the controller to aim (DualSense / DualShock 4 gyro). Other controllers use the right stick."}},
@@ -132,6 +162,10 @@ static Setting settings[] = {
     {"language", NULL, "auto", {"Idioma", "Language"}, v_lang, {n_lang, e_lang}, 3, CAT_GENERAL,
      {"Idioma deste menu e do overlay. Automático segue o idioma do Windows.",
       "Language of this menu and of the overlay. Automatic follows Windows' language."}},
+    {"updates", NULL, "1", {"Procurar atualizações", "Check for updates"}, v_onoff, {n_launch, e_launch}, 2, CAT_GENERAL,
+     {"Ao abrir, o launcher pergunta ao GitHub se saiu uma versão nova e avisa na tela inicial. Nada é baixado sozinho.",
+      "At start the launcher asks GitHub whether a new version is out and says so on the main page. Nothing is downloaded "
+      "by itself."}},
     {"launcher", NULL, "1", {"Mostrar este menu ao iniciar", "Show this menu at start"}, v_onoff, {n_launch, e_launch}, 2,
      CAT_GENERAL,
      {"Com \"Não\", o jogo abre direto. Segure Shift ao abrir para ver este menu de novo.",
@@ -201,7 +235,7 @@ static void apply(void) {
     for (int i = 0; i < NSET; i++) {
         Setting *s = &settings[i];
         if (!s->env || getenv(s->env)) continue;   // the environment wins
-        if (!strcmp(s->env, "NX2_VSYNC") && strcmp(s->value, "1")) continue;   // NX2_VSYNC is read as present / absent
+        if (!strcmp(s->env, "NX2_VSYNC") && !strcmp(s->value, "0")) continue;   // NX2_VSYNC: unset, 1 or vrr
         if (!strcmp(s->env, "NX2_CONTROLLER") && !strcmp(s->value, "auto")) continue;
         if (!s->value[0]) continue;   // the game folder left at the build's default
         _putenv_s(s->env, s->value);

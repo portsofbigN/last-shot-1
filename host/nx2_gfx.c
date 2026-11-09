@@ -66,6 +66,27 @@ static void ov_vi_bool_false(Cpu *c) {   // Query*(bool *out, ...): HDR / VRR no
     c->x[0] = 0;
 }
 static void ov_vi_ok(Cpu *c) { c->x[0] = 0; }
+// Result QueryDisplayHdrStatus(bool *enabled, HdrOutputFormat *format, uint16_t *peak_nits, const Display *)
+static void ov_vi_hdr_status(Cpu *c) {
+    uint8_t *on = (uint8_t *)(uintptr_t)c->x[0];
+    uint32_t *fmt = (uint32_t *)(uintptr_t)c->x[1];
+    uint16_t *nits = (uint16_t *)(uintptr_t)c->x[2];
+    int nx2_hdr_wanted(void);   // nx2_hdr.c: NX2_HDR=1 and Windows HDR on
+    uint16_t nx2_hdr_peak(void);
+    int hdr = nx2_hdr_wanted();
+    static int n;
+    if (n++ < 2) rt_log("vi: QueryDisplayHdrStatus: %s", hdr ? "HDR10" : "SDR");
+    if (on) *on = (uint8_t)hdr;
+    if (fmt && hdr) *fmt = 1;   // the game renders HDR10 (an RGB10A2 PQ frame) for every value tried
+    if (nits && hdr) *nits = nx2_hdr_peak();
+    c->x[0] = 0;
+}
+// Result QueryDisplayHdrPaperWhite(uint16_t *nits, const Display *): the brightness of SDR white in HDR
+static void ov_vi_paper_white(Cpu *c) {
+    uint16_t *nits = (uint16_t *)(uintptr_t)c->x[0];
+    if (nits) *nits = 203;
+    c->x[0] = 0;
+}
 
 HOST_OVERRIDE("_ZN2nv20SetGraphicsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", ov_graphics_allocator);
 HOST_OVERRIDE("_ZN2nv28SetGraphicsDevtoolsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", ov_devtools_allocator);
@@ -75,8 +96,11 @@ HOST_OVERRIDE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", ov_open_display);
 HOST_OVERRIDE("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", ov_create_layer);
 HOST_OVERRIDE("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", ov_native_window);
 HOST_OVERRIDE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", ov_vsync_event);
-HOST_OVERRIDE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", ov_vi_bool_false);
+HOST_OVERRIDE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", ov_vi_hdr_status);
 HOST_OVERRIDE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", ov_vi_bool_false);
+HOST_OVERRIDE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", ov_vi_paper_white);
+HOST_OVERRIDE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", ov_vi_ok);
+HOST_OVERRIDE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", ov_vi_ok);
 HOST_OVERRIDE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", ov_vi_ok);
 HOST_OVERRIDE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", ov_vi_ok);
 HOST_OVERRIDE("_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", ov_vi_ok);
@@ -998,7 +1022,16 @@ static void hp_window_acquire(Cpu *c) {
 }
 static void hp_window_num_textures(Cpu *c) { c->x[0] = (uint64_t)g_win.textures; }
 static void hp_window_get_interval(Cpu *c) { c->x[0] = (uint64_t)g_win.interval; }
-static void hp_window_set_interval(Cpu *c) { g_win.interval = (int)c->x[1]; }
+static void hp_window_set_interval(Cpu *c) {
+    int v = (int)c->x[1];
+    if (v != g_win.interval) {
+        extern uint64_t nx2_vk_frame;
+        static int n;
+        if (n++ < 64) rt_log("nvn2: present interval %d -> %d (present %llu)", g_win.interval, v, (unsigned long long)nx2_vk_frame);
+    }
+    g_win.interval = v;
+}
+int nx2_present_interval(void) { return g_win.interval > 0 ? g_win.interval : 1; }
 static void hp_window_get_native(Cpu *c) { c->x[0] = g_win.native; }
 
 // void *nvnBootstrapLoader(const char *name)
